@@ -2,7 +2,6 @@
 
 test_description='see how we handle various forms of corruption'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 # convert "1234abcd" to ".git/objects/12/34abcd"
@@ -125,7 +124,7 @@ test_expect_success 'fetch into corrupted repo with index-pack' '
 		cd bit-error-cp &&
 		test_must_fail git -c transfer.unpackLimit=1 \
 			fetch ../no-bit-error 2>stderr &&
-		test_i18ngrep ! -i collision stderr
+		test_grep ! -i collision stderr
 	)
 '
 
@@ -137,6 +136,31 @@ test_expect_success 'internal tree objects are not "missing"' '
 		commit=$(echo foo | git commit-tree $empty_tree) &&
 		git rev-list --objects $commit
 	)
+'
+
+test_expect_success 'partial clone of corrupted repository' '
+	test_config -C misnamed uploadpack.allowFilter true &&
+	git clone --no-local --no-checkout --filter=blob:none \
+		misnamed corrupt-partial && \
+	test_must_fail git -C corrupt-partial checkout --force
+'
+
+test_expect_success 'corrupted loose commit can be read from alternate' '
+	git init repo-a &&
+	tree=$(git -C repo-a write-tree) &&
+	commit=$(git -C repo-a commit-tree $tree </dev/null) &&
+
+	cp -r repo-a repo-b &&
+	(
+		cd repo-b &&
+		echo ../../../repo-a/.git/objects >.git/objects/info/alternates &&
+		corrupt_byte "$commit" 1
+	) &&
+
+	git -C repo-a cat-file -p "$commit" >expect &&
+	git -C repo-b cat-file -p "$commit" >actual 2>err &&
+	test_cmp expect actual &&
+	test_grep "inflate: data stream error" err
 '
 
 test_done

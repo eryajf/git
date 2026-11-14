@@ -130,7 +130,7 @@ test_expect_success 'subtest: a failing TODO test' '
 '
 
 test_expect_success 'subtest: a passing TODO test' '
-	write_and_run_sub_test_lib_test passing-todo <<-\EOF &&
+	write_and_run_sub_test_lib_test_err passing-todo <<-\EOF &&
 	test_expect_failure "pretend we have fixed a known breakage" "true"
 	test_done
 	EOF
@@ -142,7 +142,7 @@ test_expect_success 'subtest: a passing TODO test' '
 '
 
 test_expect_success 'subtest: 2 TODO tests, one passin' '
-	write_and_run_sub_test_lib_test partially-passing-todos <<-\EOF &&
+	write_and_run_sub_test_lib_test_err partially-passing-todos <<-\EOF &&
 	test_expect_failure "pretend we have a known breakage" "false"
 	test_expect_success "pretend we have a passing test" "true"
 	test_expect_failure "pretend we have fixed another known breakage" "true"
@@ -219,41 +219,44 @@ test_expect_success 'subtest: --verbose option' '
 	test_expect_success "failing test" false
 	test_done
 	EOF
-	mv t1234-verbose/out t1234-verbose/out+ &&
-	grep -v "^Initialized empty" t1234-verbose/out+ >t1234-verbose/out &&
-	check_sub_test_lib_test t1234-verbose <<-\EOF
-	> expecting success of 1234.1 '\''passing test'\'': true
+	mv t1234-verbose/err t1234-verbose/err+ &&
+	grep -v "^Initialized empty" t1234-verbose/err+ >t1234-verbose/err &&
+	check_sub_test_lib_test_err t1234-verbose \
+		<<-\EOF_OUT 3<<-\EOF_ERR
 	> ok 1 - passing test
+	> ok 2 - test with output
+	> not ok 3 - failing test
+	> #	false
+	> # failed 1 among 3 test(s)
+	> 1..3
+	EOF_OUT
+	> expecting success of 1234.1 '\''passing test'\'': true
 	> Z
 	> expecting success of 1234.2 '\''test with output'\'': echo foo
 	> foo
-	> ok 2 - test with output
 	> Z
 	> expecting success of 1234.3 '\''failing test'\'': false
-	> not ok 3 - failing test
-	> #	false
 	> Z
-	> # failed 1 among 3 test(s)
-	> 1..3
-	EOF
+	EOF_ERR
 '
 
 test_expect_success 'subtest: --verbose-only option' '
 	run_sub_test_lib_test_err \
 		t1234-verbose \
 		--verbose-only=2 &&
-	check_sub_test_lib_test t1234-verbose <<-\EOF
+	check_sub_test_lib_test_err t1234-verbose <<-\EOF_OUT 3<<-\EOF_ERR
 	> ok 1 - passing test
-	> Z
-	> expecting success of 1234.2 '\''test with output'\'': echo foo
-	> foo
 	> ok 2 - test with output
-	> Z
 	> not ok 3 - failing test
 	> #	false
 	> # failed 1 among 3 test(s)
 	> 1..3
-	EOF
+	EOF_OUT
+	> Z
+	> expecting success of 1234.2 '\''test with output'\'': echo foo
+	> foo
+	> Z
+	EOF_ERR
 '
 
 test_expect_success 'subtest: skip one with GIT_SKIP_TESTS' '
@@ -578,6 +581,78 @@ test_expect_success 'subtest: --run invalid range end' '
 	EOF_ERR
 '
 
+test_expect_success 'subtest: --invert-exit-code without --immediate' '
+	run_sub_test_lib_test_err full-pass \
+		--invert-exit-code &&
+	check_sub_test_lib_test_err full-pass \
+		<<-\EOF_OUT 3<<-EOF_ERR
+	ok 1 - passing test #1
+	ok 2 - passing test #2
+	ok 3 - passing test #3
+	# passed all 3 test(s)
+	1..3
+	# faking up non-zero exit with --invert-exit-code
+	EOF_OUT
+	EOF_ERR
+'
+
+test_expect_success 'subtest: --invert-exit-code with --immediate: all passed' '
+	run_sub_test_lib_test_err full-pass \
+		--invert-exit-code --immediate &&
+	check_sub_test_lib_test_err full-pass \
+		<<-\EOF_OUT 3<<-EOF_ERR
+	ok 1 - passing test #1
+	ok 2 - passing test #2
+	ok 3 - passing test #3
+	# passed all 3 test(s)
+	1..3
+	# faking up non-zero exit with --invert-exit-code
+	EOF_OUT
+	EOF_ERR
+'
+
+test_expect_success 'subtest: --invert-exit-code without --immediate: partial pass' '
+	run_sub_test_lib_test partial-pass \
+		--invert-exit-code &&
+	check_sub_test_lib_test partial-pass <<-\EOF
+	ok 1 - passing test #1
+	not ok 2 - # TODO induced breakage (--invert-exit-code): failing test #2
+	#	false
+	ok 3 - passing test #3
+	# failed 1 among 3 test(s)
+	1..3
+	# faked up failures as TODO & now exiting with 0 due to --invert-exit-code
+	EOF
+'
+
+test_expect_success 'subtest: --invert-exit-code with --immediate: partial pass' '
+	run_sub_test_lib_test partial-pass \
+		--invert-exit-code --immediate &&
+	check_sub_test_lib_test partial-pass \
+		<<-\EOF_OUT 3<<-EOF_ERR
+	ok 1 - passing test #1
+	not ok 2 - # TODO induced breakage (--invert-exit-code): failing test #2
+	#	false
+	1..2
+	# faked up failures as TODO & now exiting with 0 due to --invert-exit-code
+	EOF_OUT
+	EOF_ERR
+'
+
+test_expect_success 'subtest: --invert-exit-code --immediate: got a failure' '
+	run_sub_test_lib_test partial-pass \
+		--invert-exit-code --immediate &&
+	check_sub_test_lib_test_err partial-pass \
+		<<-\EOF_OUT 3<<-EOF_ERR
+	ok 1 - passing test #1
+	not ok 2 - # TODO induced breakage (--invert-exit-code): failing test #2
+	#	false
+	1..2
+	# faked up failures as TODO & now exiting with 0 due to --invert-exit-code
+	EOF_OUT
+	EOF_ERR
+'
+
 test_expect_success 'subtest: tests respect prerequisites' '
 	write_and_run_sub_test_lib_test prereqs <<-\EOF &&
 
@@ -612,7 +687,7 @@ test_expect_success 'subtest: tests respect lazy prerequisites' '
 	write_and_run_sub_test_lib_test lazy-prereqs <<-\EOF &&
 
 	test_lazy_prereq LAZY_TRUE true
-	test_expect_success LAZY_TRUE "lazy prereq is satisifed" "true"
+	test_expect_success LAZY_TRUE "lazy prereq is satisfied" "true"
 	test_expect_success !LAZY_TRUE "negative lazy prereq" "false"
 
 	test_lazy_prereq LAZY_FALSE false
@@ -623,7 +698,7 @@ test_expect_success 'subtest: tests respect lazy prerequisites' '
 	EOF
 
 	check_sub_test_lib_test lazy-prereqs <<-\EOF
-	ok 1 - lazy prereq is satisifed
+	ok 1 - lazy prereq is satisfied
 	ok 2 # skip negative lazy prereq (missing !LAZY_TRUE)
 	ok 3 # skip lazy prereq not satisfied (missing LAZY_FALSE)
 	ok 4 - negative false prereq
@@ -668,7 +743,7 @@ test_expect_success 'subtest: lazy prereqs do not turn off tracing' '
 	test_done
 	EOF
 
-	grep "echo trace" lazy-prereq-and-tracing/err
+	test_grep "echo trace" lazy-prereq-and-tracing/err
 '
 
 test_expect_success 'subtest: tests clean up after themselves' '
@@ -740,10 +815,11 @@ test_expect_success 'subtest: test_atexit is run' '
 
 test_expect_success 'test_oid provides sane info by default' '
 	test_oid zero >actual &&
-	grep "^00*\$" actual &&
+	test_grep "^00*\$" actual &&
 	rawsz="$(test_oid rawsz)" &&
 	hexsz="$(test_oid hexsz)" &&
-	test "$hexsz" -eq $(wc -c <actual) &&
+	# +1 accounts for the trailing newline
+	test $(( $hexsz + 1)) -eq $(wc -c <actual) &&
 	test $(( $rawsz * 2)) -eq "$hexsz"
 '
 
@@ -751,10 +827,10 @@ test_expect_success 'test_oid can look up data for SHA-1' '
 	test_when_finished "test_detect_hash" &&
 	test_set_hash sha1 &&
 	test_oid zero >actual &&
-	grep "^00*\$" actual &&
+	test_grep "^00*\$" actual &&
 	rawsz="$(test_oid rawsz)" &&
 	hexsz="$(test_oid hexsz)" &&
-	test $(wc -c <actual) -eq 40 &&
+	test $(wc -c <actual) -eq 41 &&
 	test "$rawsz" -eq 20 &&
 	test "$hexsz" -eq 40
 '
@@ -763,10 +839,10 @@ test_expect_success 'test_oid can look up data for SHA-256' '
 	test_when_finished "test_detect_hash" &&
 	test_set_hash sha256 &&
 	test_oid zero >actual &&
-	grep "^00*\$" actual &&
+	test_grep "^00*\$" actual &&
 	rawsz="$(test_oid rawsz)" &&
 	hexsz="$(test_oid hexsz)" &&
-	test $(wc -c <actual) -eq 64 &&
+	test $(wc -c <actual) -eq 65 &&
 	test "$rawsz" -eq 32 &&
 	test "$hexsz" -eq 64
 '
@@ -808,11 +884,11 @@ test_expect_success 'test_bool_env' '
 		# test script, hence the redirection of fd 7, and aborts
 		# with "exit 1", hence the subshell.
 		! ( test_bool_env envvar true ) 7>err &&
-		grep "error: test_bool_env requires bool values" err &&
+		test_grep "error: test_bool_env requires bool values" err &&
 
 		envvar=true &&
 		! ( test_bool_env envvar invalid ) 7>err &&
-		grep "error: test_bool_env requires bool values" err
+		test_grep "error: test_bool_env requires bool values" err
 	)
 '
 
@@ -941,7 +1017,7 @@ test_expect_success 'validate object ID for a known tree' '
 '
 
 test_expect_success 'showing tree with git ls-tree' '
-    git ls-tree $tree >current
+	git ls-tree $tree >current
 '
 
 test_expect_success 'git ls-tree output for a known tree' '
@@ -1128,6 +1204,34 @@ test_expect_success 'very long name in the index handled sanely' '
 	test $len = 4098
 '
 
+# D/F conflict checking uses an optimization when adding to the end.
+# make sure it does not get confused by `a-` sorting _between_
+# `a` and `a/`.
+test_expect_success 'more update-index D/F conflicts' '
+	# empty the index to make sure our entry is last
+	git read-tree --empty &&
+	cacheinfo=100644,$(test_oid empty_blob) &&
+	git update-index --add --cacheinfo $cacheinfo,path5/a &&
+
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/file &&
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/b/file &&
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/b/c/file &&
+
+	# "a-" sorts between "a" and "a/"
+	git update-index --add --cacheinfo $cacheinfo,path5/a- &&
+
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/file &&
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/b/file &&
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/b/c/file &&
+
+	cat >expected <<-\EOF &&
+	path5/a
+	path5/a-
+	EOF
+	git ls-files >actual &&
+	test_cmp expected actual
+'
+
 test_expect_success 'test_must_fail on a failing git command' '
 	test_must_fail git notacommand
 '
@@ -1138,12 +1242,12 @@ test_expect_success 'test_must_fail on a failing git command with env' '
 
 test_expect_success 'test_must_fail rejects a non-git command' '
 	! test_must_fail grep ^$ notafile 2>err &&
-	grep -F "test_must_fail: only '"'"'git'"'"' is allowed" err
+	test_grep -F "test_must_fail: only '"'"'git'"'"' is allowed" err
 '
 
 test_expect_success 'test_must_fail rejects a non-git command with env' '
 	! test_must_fail env var1=a var2=b grep ^$ notafile 2>err &&
-	grep -F "test_must_fail: only '"'"'git'"'"' is allowed" err
+	test_grep -F "test_must_fail: only '"'"'git'"'"' is allowed" err
 '
 
 test_done

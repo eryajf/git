@@ -16,6 +16,7 @@ export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
 
 test_expect_success 'setup a submodule tree' '
+	git config --global protocol.file.allow always &&
 	echo file > file &&
 	git add file &&
 	test_tick &&
@@ -151,6 +152,11 @@ test_expect_success 'use "submodule foreach" to checkout 2nd level submodule' '
 		git rev-parse --resolve-git-dir nested1/nested2/.git &&
 		test_must_fail git rev-parse --resolve-git-dir nested1/nested2/nested3/.git
 	)
+'
+
+test_expect_success 'usage: foreach -- --not-an-option' '
+	test_expect_code 1 git submodule foreach -- --not-an-option &&
+	test_expect_code 1 git -C clone2 submodule foreach -- --not-an-option
 '
 
 test_expect_success 'use "foreach --recursive" to checkout all submodules' '
@@ -420,14 +426,14 @@ test_expect_success 'option-like arguments passed to foreach commands are not lo
 		git submodule foreach "echo be --quiet" > ../expected &&
 		git submodule foreach echo be --quiet > ../actual
 	) &&
-	grep -sq -e "--quiet" expected &&
+	test_grep -e "--quiet" expected &&
 	test_cmp expected actual
 '
 
 test_expect_success 'option-like arguments passed to foreach recurse correctly' '
 	git -C clone2 submodule foreach --recursive "echo be --an-option" >expect &&
 	git -C clone2 submodule foreach --recursive echo be --an-option >actual &&
-	grep -e "--an-option" expect &&
+	test_grep -e "--an-option" expect &&
 	test_cmp expect actual
 '
 

@@ -2,7 +2,6 @@
 
 test_description='git cat-file filters support'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup ' '
@@ -43,14 +42,14 @@ test_expect_success 'cat-file --textconv --path=<path> works' '
 	sha1=$(git rev-parse -q --verify HEAD:world.txt) &&
 	test_config diff.txt.textconv "tr A-Za-z N-ZA-Mn-za-m <" &&
 	git cat-file --textconv --path=hello.txt $sha1 >rot13 &&
-	test uryyb = "$(cat rot13 | remove_cr)"
+	test uryyb = "$(remove_cr <rot13)"
 '
 
 test_expect_success '--path=<path> complains without --textconv/--filters' '
 	sha1=$(git rev-parse -q --verify HEAD:world.txt) &&
 	test_must_fail git cat-file --path=hello.txt blob $sha1 >actual 2>err &&
 	test_must_be_empty actual &&
-	grep "path.*needs.*filters" err
+	test_grep "path.*needs.*filters" err
 '
 
 test_expect_success '--textconv/--filters complain without path' '

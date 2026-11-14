@@ -105,7 +105,7 @@ verify_mergeheads () {
 	test_write_lines "$@" >mergehead.expected &&
 	while read sha1 rest
 	do
-		git rev-parse $sha1
+		git rev-parse $sha1 || return 1
 	done <.git/MERGE_HEAD >mergehead.actual &&
 	test_cmp mergehead.expected mergehead.actual
 }
@@ -173,9 +173,9 @@ test_expect_success 'merge -h with invalid index' '
 		cd broken &&
 		git init &&
 		>.git/index &&
-		test_expect_code 129 git merge -h 2>usage
+		git merge -h >usage
 	) &&
-	test_i18ngrep "[Uu]sage: git merge" broken/usage
+	test_grep "[Uu]sage: git merge" broken/usage
 '
 
 test_expect_success 'reject non-strategy with a git-merge-foo name' '
@@ -185,8 +185,19 @@ test_expect_success 'reject non-strategy with a git-merge-foo name' '
 test_expect_success 'merge c0 with c1' '
 	echo "OBJID HEAD@{0}: merge c1: Fast-forward" >reflog.expected &&
 
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file  | 2 +-
+	 other | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	 create mode 100644 other
+	EOF
+
 	git reset --hard c0 &&
-	git merge c1 &&
+	git merge c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual &&
 	verify_merge file result.1 &&
 	verify_head "$c1" &&
 
@@ -203,6 +214,67 @@ test_expect_success 'merge c0 with c1 with --ff-only' '
 	git merge --ff-only HEAD c0 c1 &&
 	verify_merge file result.1 &&
 	verify_head "$c1"
+'
+
+test_expect_success 'the same merge with merge.stat=diffstat' '
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file  | 2 +-
+	 other | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	 create mode 100644 other
+	EOF
+
+	git reset --hard c0 &&
+	git -c merge.stat=diffstat merge c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'the same merge with compact summary' '
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file        | 2 +-
+	 other (new) | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	EOF
+
+	git reset --hard c0 &&
+	git merge --compact-summary c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'the same merge with compact summary' '
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file        | 2 +-
+	 other (new) | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	EOF
+
+	git reset --hard c0 &&
+	git merge --compact-summary c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'the same merge with merge.stat=compact' '
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file        | 2 +-
+	 other (new) | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	EOF
+
+	git reset --hard c0 &&
+	git -c merge.stat=compact merge c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual
 '
 
 test_debug 'git log --graph --decorate --oneline --all'
@@ -236,6 +308,16 @@ test_expect_success 'merge c1 with c2' '
 	verify_parents $c1 $c2
 '
 
+test_expect_success 'merge c1 with c2 when index.lock exists' '
+	test_when_finished rm .git/index.lock &&
+	git reset --hard c1 &&
+	>.git/index.lock &&
+	test_must_fail git merge c2 &&
+	test_path_is_missing .git/MERGE_HEAD &&
+	test_path_is_missing .git/MERGE_MODE &&
+	test_path_is_missing .git/MERGE_MSG
+'
+
 test_expect_success 'merge --squash c3 with c7' '
 	git reset --hard c3 &&
 	test_must_fail git merge --squash c7 &&
@@ -250,9 +332,17 @@ test_expect_success 'merge --squash c3 with c7' '
 	# Conflicts:
 	#	file
 	EOF
-	git cat-file commit HEAD >raw &&
-	sed -e "1,/^$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'merge --squash --autostash conflict does not attempt to apply autostash' '
+	git reset --hard c3 &&
+	>unrelated &&
+	git add unrelated &&
+	test_must_fail git merge --squash c7 --autostash >out 2>err &&
+	test_grep ! "Applying autostash resulted in conflicts." err &&
+	test_grep "When finished, apply stashed changes with \`git stash pop\`" out
 '
 
 test_expect_success 'merge c3 with c7 with commit.cleanup = scissors' '
@@ -272,8 +362,7 @@ test_expect_success 'merge c3 with c7 with commit.cleanup = scissors' '
 	# Conflicts:
 	#	file
 	EOF
-	git cat-file commit HEAD >raw &&
-	sed -e "1,/^$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -296,8 +385,7 @@ test_expect_success 'merge c3 with c7 with --squash commit.cleanup = scissors' '
 	# Conflicts:
 	#	file
 	EOF
-	git cat-file commit HEAD >raw &&
-	sed -e "1,/^$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -630,41 +718,41 @@ test_expect_success 'merge log message' '
 test_debug 'git log --graph --decorate --oneline --all'
 
 test_expect_success 'merge c1 with c0, c2, c0, and c1' '
-       git reset --hard c1 &&
-       test_tick &&
-       git merge c0 c2 c0 c1 &&
-       verify_merge file result.1-5 &&
-       verify_parents $c1 $c2
+	git reset --hard c1 &&
+	test_tick &&
+	git merge c0 c2 c0 c1 &&
+	verify_merge file result.1-5 &&
+	verify_parents $c1 $c2
 '
 
 test_debug 'git log --graph --decorate --oneline --all'
 
 test_expect_success 'merge c1 with c0, c2, c0, and c1' '
-       git reset --hard c1 &&
-       test_tick &&
-       git merge c0 c2 c0 c1 &&
-       verify_merge file result.1-5 &&
-       verify_parents $c1 $c2
+	git reset --hard c1 &&
+	test_tick &&
+	git merge c0 c2 c0 c1 &&
+	verify_merge file result.1-5 &&
+	verify_parents $c1 $c2
 '
 
 test_debug 'git log --graph --decorate --oneline --all'
 
 test_expect_success 'merge c1 with c1 and c2' '
-       git reset --hard c1 &&
-       test_tick &&
-       git merge c1 c2 &&
-       verify_merge file result.1-5 &&
-       verify_parents $c1 $c2
+	git reset --hard c1 &&
+	test_tick &&
+	git merge c1 c2 &&
+	verify_merge file result.1-5 &&
+	verify_parents $c1 $c2
 '
 
 test_debug 'git log --graph --decorate --oneline --all'
 
 test_expect_success 'merge fast-forward in a dirty tree' '
-       git reset --hard c0 &&
-       mv file file1 &&
-       cat file1 >file &&
-       rm -f file1 &&
-       git merge c2
+	git reset --hard c0 &&
+	mv file file1 &&
+	cat file1 >file &&
+	rm -f file1 &&
+	git merge c2
 '
 
 test_debug 'git log --graph --decorate --oneline --all'
@@ -672,7 +760,7 @@ test_debug 'git log --graph --decorate --oneline --all'
 test_expect_success 'in-index merge' '
 	git reset --hard c0 &&
 	git merge --no-ff -s resolve c1 >out &&
-	test_i18ngrep "Wonderful." out &&
+	test_grep "Wonderful." out &&
 	verify_parents $c0 $c1
 '
 
@@ -688,7 +776,7 @@ test_expect_success 'merge with --autostash' '
 	git reset --hard c1 &&
 	git merge-file file file.orig file.9 &&
 	git merge --autostash c2 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	git show HEAD:file >merge-result &&
 	test_cmp result.1-5 merge-result &&
 	test_cmp result.1-5-9 file
@@ -699,7 +787,7 @@ test_expect_success 'merge with merge.autoStash' '
 	git reset --hard c1 &&
 	git merge-file file file.orig file.9 &&
 	git merge c2 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	git show HEAD:file >merge-result &&
 	test_cmp result.1-5 merge-result &&
 	test_cmp result.1-5-9 file
@@ -709,8 +797,17 @@ test_expect_success 'fast-forward merge with --autostash' '
 	git reset --hard c0 &&
 	git merge-file file file.orig file.5 &&
 	git merge --autostash c1 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	test_cmp result.1-5 file
+'
+
+test_expect_success 'fast-forward merge with --autostash, stash.index' '
+	git reset --hard c0 &&
+	git stash clear &&
+	echo staged >>z && git add z &&
+	git -c stash.index=true merge --autostash c1 2>err &&
+	test_grep "Applied autostash." err &&
+	test_stdout_line_count = 0 git stash list
 '
 
 test_expect_success 'failed fast-forward merge with --autostash' '
@@ -719,7 +816,7 @@ test_expect_success 'failed fast-forward merge with --autostash' '
 	cp file.5 other &&
 	test_when_finished "rm other" &&
 	test_must_fail git merge --autostash c1 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	test_cmp file.5 file
 '
 
@@ -727,7 +824,7 @@ test_expect_success 'octopus merge with --autostash' '
 	git reset --hard c1 &&
 	git merge-file file file.orig file.3 &&
 	git merge --autostash c2 c3 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	git show HEAD:file >merge-result &&
 	test_cmp result.1-5-9 merge-result &&
 	test_cmp result.1-3-5-9 file
@@ -737,7 +834,7 @@ test_expect_success 'failed merge (exit 2) with --autostash' '
 	git reset --hard c1 &&
 	git merge-file file file.orig file.5 &&
 	test_must_fail git merge -s recursive --autostash c2 c3 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	test_cmp result.1-5 file
 '
 
@@ -746,7 +843,7 @@ test_expect_success 'conflicted merge with --autostash, --abort restores stash' 
 	cp file.1 file &&
 	test_must_fail git merge --autostash c7 &&
 	git merge --abort 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	test_cmp file.1 file
 '
 
@@ -758,7 +855,7 @@ test_expect_success 'completed merge (git commit) with --no-commit and --autosta
 	git stash show -p MERGE_AUTOSTASH >actual &&
 	test_cmp expect actual &&
 	git commit 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	git show HEAD:file >merge-result &&
 	test_cmp result.1-5 merge-result &&
 	test_cmp result.1-5-9 file
@@ -772,7 +869,7 @@ test_expect_success 'completed merge (git merge --continue) with --no-commit and
 	git stash show -p MERGE_AUTOSTASH >actual &&
 	test_cmp expect actual &&
 	git merge --continue 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	git show HEAD:file >merge-result &&
 	test_cmp result.1-5 merge-result &&
 	test_cmp result.1-5-9 file
@@ -786,7 +883,7 @@ test_expect_success 'aborted merge (merge --abort) with --no-commit and --autost
 	git stash show -p MERGE_AUTOSTASH >actual &&
 	test_cmp expect actual &&
 	git merge --abort 2>err &&
-	test_i18ngrep "Applied autostash." err &&
+	test_grep "Applied autostash." err &&
 	git diff >actual &&
 	test_cmp expect actual
 '
@@ -799,7 +896,7 @@ test_expect_success 'aborted merge (reset --hard) with --no-commit and --autosta
 	git stash show -p MERGE_AUTOSTASH >actual &&
 	test_cmp expect actual &&
 	git reset --hard 2>err &&
-	test_i18ngrep "Autostash exists; creating a new stash entry." err &&
+	test_grep "Autostash exists; creating a new stash entry." err &&
 	git diff --exit-code
 '
 
@@ -812,7 +909,7 @@ test_expect_success 'quit merge with --no-commit and --autostash' '
 	test_cmp expect actual &&
 	git diff HEAD >expect &&
 	git merge --quit 2>err &&
-	test_i18ngrep "Autostash exists; creating a new stash entry." err &&
+	test_grep "Autostash exists; creating a new stash entry." err &&
 	git diff HEAD >actual &&
 	test_cmp expect actual
 '
@@ -823,7 +920,8 @@ test_expect_success 'merge with conflicted --autostash changes' '
 	git diff >expect &&
 	test_when_finished "test_might_fail git stash drop" &&
 	git merge --autostash c3 2>err &&
-	test_i18ngrep "Applying autostash resulted in conflicts." err &&
+	test_grep "applying them" err &&
+	test_grep "resulted in conflicts" err &&
 	git show HEAD:file >merge-result &&
 	test_cmp result.1-9 merge-result &&
 	git stash show -p >actual &&
@@ -897,9 +995,8 @@ test_expect_success 'merge --no-ff --edit' '
 	git reset --hard c0 &&
 	EDITOR=./editor git merge --no-ff --edit c1 &&
 	verify_parents $c0 $c1 &&
-	git cat-file commit HEAD >raw &&
-	grep "work done on the side branch" raw &&
-	sed "1,/^$/d" >actual raw &&
+	commit_body HEAD >actual &&
+	test_grep "work done on the side branch" actual &&
 	test_cmp expected actual
 '
 
@@ -961,6 +1058,43 @@ test_expect_success GPG 'merge --no-edit tag should skip editor' '
 	git rev-parse signed^0 >expect &&
 	git rev-parse HEAD^2 >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success GPG 'merge tag with multiple signatures' '
+	git commit --allow-empty -m "A newer commit" &&
+	git tag -s -m "A newer commit" signed_base &&
+
+	OBJECT_ID=$(git rev-parse HEAD) &&
+	git cat-file -p signed_base >base &&
+	HEADERS=$(sed "/^$/q" base) &&
+	BODY=$(sed "1,/^$/d" base) &&
+
+	# Manually craft a tag with multiple signatures. But we
+	# utilize the signature of a valid tag, so that this new tag will
+	# also pass verification.
+	cat >tag-text <<-EOF &&
+	$HEADERS
+	gpgsig -----BEGIN PGP SIGNATURE-----
+	 VGhpcyBpcyBub3QgcmVhbGx5IGEgc2lnbmF0dXJlLg==
+	 -----END PGP SIGNATURE-----
+	gpgsig-sha256 -----BEGIN PGP SIGNATURE-----
+	 VGhpcyBpcyBub3QgcmVhbGx5IGEgc2lnbmF0dXJlLg==
+	 -----END PGP SIGNATURE-----
+	gpgsig-sha256 -----BEGIN PGP SIGNATURE-----
+	 VGhpcyBpcyBub3QgcmVhbGx5IGEgc2lnbmF0dXJlLg==
+	 -----END PGP SIGNATURE-----
+
+	$BODY
+	EOF
+
+	TAG_HASH=$(git hash-object -t tag -w tag-text) &&
+	git update-ref refs/tags/multiple-signs $TAG_HASH &&
+	git reset --hard @~1 &&
+	git merge --no-edit multiple-signs &&
+	git cat-file -p HEAD >actual &&
+	# During the merge of signed tags, validation is done against the
+	# payload after stripping any additional signature.
+	test_grep "Good signature" actual
 '
 
 test_expect_success 'set up mod-256 conflict scenario' '
@@ -1065,13 +1199,30 @@ test_expect_success 'merge suggests matching remote refname' '
 	git pack-refs --all --prune &&
 
 	test_must_fail git merge not-local 2>stderr &&
-	grep origin/not-local stderr
+	test_grep origin/not-local stderr
 '
 
 test_expect_success 'suggested names are not ambiguous' '
 	git update-ref refs/heads/origin/not-local HEAD &&
 	test_must_fail git merge not-local 2>stderr &&
-	grep remotes/origin/not-local stderr
+	test_grep remotes/origin/not-local stderr
+'
+
+test_expect_success 'merge with no argument defaults to upstream' '
+	test_when_finished "rm -rf upstream downstream" &&
+	git init upstream &&
+	(
+		cd upstream &&
+		test_commit one &&
+		test_commit two
+	) &&
+	git clone upstream downstream &&
+	(
+		cd downstream &&
+		git reset --hard HEAD^ &&
+		git merge &&
+		test_cmp_rev origin/main HEAD
+	)
 '
 
 test_done

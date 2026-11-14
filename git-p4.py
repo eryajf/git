@@ -54,7 +54,7 @@ import time
 import zipfile
 import zlib
 
-# On python2.7 where raw_input() and input() are both availble,
+# On python2.7 where raw_input() and input() are both available,
 # we want raw_input's semantics, but aliased to input for python3
 # compatibility
 # support basestring in python3
@@ -689,8 +689,8 @@ def setP4ExecBit(file, mode):
 
     if not isModeExec(mode):
         p4Type = getP4OpenedType(file)
-        p4Type = re.sub('^([cku]?)x(.*)', '\\1\\2', p4Type)
-        p4Type = re.sub('(.*?\+.*?)x(.*?)', '\\1\\2', p4Type)
+        p4Type = re.sub(r'^([cku]?)x(.*)', r'\1\2', p4Type)
+        p4Type = re.sub(r'(.*?\+.*?)x(.*?)', r'\1\2', p4Type)
         if p4Type[-1] == "+":
             p4Type = p4Type[0:-1]
 
@@ -701,7 +701,7 @@ def getP4OpenedType(file):
     """Returns the perforce file type for the given file."""
 
     result = p4_read_pipe(["opened", wildcard_encode(file)])
-    match = re.match(".*\((.+)\)( \*exclusive\*)?\r?$", result)
+    match = re.match(r".*\((.+)\)( \*exclusive\*)?\r?$", result)
     if match:
         return match.group(1)
     else:
@@ -757,7 +757,7 @@ def parseDiffTreeEntry(entry):
 
     global _diff_tree_pattern
     if not _diff_tree_pattern:
-        _diff_tree_pattern = re.compile(':(\d+) (\d+) (\w+) (\w+) ([A-Z])(\d+)?\t(.*?)((\t(.*))|$)')
+        _diff_tree_pattern = re.compile(r':(\d+) (\d+) (\w+) (\w+) ([A-Z])(\d+)?\t(.*?)((\t(.*))|$)')
 
     match = _diff_tree_pattern.match(entry)
     if match:
@@ -822,6 +822,42 @@ def isModeExecChanged(src_mode, dst_mode):
     return isModeExec(src_mode) != isModeExec(dst_mode)
 
 
+def p4KeysContainingNonUtf8Chars():
+    """Returns all keys which may contain non UTF-8 encoded strings
+       for which a fallback strategy has to be applied.
+       """
+    return ['desc', 'client', 'FullName']
+
+
+def p4KeysContainingBinaryData():
+    """Returns all keys which may contain arbitrary binary data
+       """
+    return ['data']
+
+
+def p4KeyContainsFilePaths(key):
+    """Returns True if the key contains file paths. These are handled by decode_path().
+       Otherwise False.
+       """
+    return key.startswith('depotFile') or key in ['path', 'clientFile']
+
+
+def p4KeyWhichCanBeDirectlyDecoded(key):
+    """Returns True if the key can be directly decoded as UTF-8 string
+       Otherwise False.
+
+       Keys which can not be encoded directly:
+         - `data` which may contain arbitrary binary data
+         - `desc` or `client` or `FullName` which may contain non-UTF8 encoded text
+         - `depotFile[0-9]*`, `path`, or `clientFile` which may contain non-UTF8 encoded text, handled by decode_path()
+       """
+    if key in p4KeysContainingNonUtf8Chars() or \
+       key in p4KeysContainingBinaryData() or  \
+       p4KeyContainsFilePaths(key):
+        return False
+    return True
+
+
 def p4CmdList(cmd, stdin=None, stdin_mode='w+b', cb=None, skip_info=False,
         errors_as_exceptions=False, *k, **kw):
 
@@ -851,15 +887,13 @@ def p4CmdList(cmd, stdin=None, stdin_mode='w+b', cb=None, skip_info=False,
     try:
         while True:
             entry = marshal.load(p4.stdout)
+
             if bytes is not str:
-                # Decode unmarshalled dict to use str keys and values, except for:
-                #   - `data` which may contain arbitrary binary data
-                #   - `desc` or `FullName` which may contain non-UTF8 encoded text handled below, eagerly converted to bytes
-                #   - `depotFile[0-9]*`, `path`, or `clientFile` which may contain non-UTF8 encoded text, handled by decode_path()
+                # Decode unmarshalled dict to use str keys and values. Special cases are handled below.
                 decoded_entry = {}
                 for key, value in entry.items():
                     key = key.decode()
-                    if isinstance(value, bytes) and not (key in ('data', 'desc', 'FullName', 'path', 'clientFile') or key.startswith('depotFile')):
+                    if isinstance(value, bytes) and p4KeyWhichCanBeDirectlyDecoded(key):
                         value = value.decode()
                     decoded_entry[key] = value
                 # Parse out data if it's an error response
@@ -869,10 +903,9 @@ def p4CmdList(cmd, stdin=None, stdin_mode='w+b', cb=None, skip_info=False,
             if skip_info:
                 if 'code' in entry and entry['code'] == 'info':
                     continue
-            if 'desc' in entry:
-                entry['desc'] = metadata_stream_to_writable_bytes(entry['desc'])
-            if 'FullName' in entry:
-                entry['FullName'] = metadata_stream_to_writable_bytes(entry['FullName'])
+            for key in p4KeysContainingNonUtf8Chars():
+                if key in entry:
+                    entry[key] = metadata_stream_to_writable_bytes(entry[key])
             if cb is not None:
                 cb(entry)
             else:
@@ -885,9 +918,9 @@ def p4CmdList(cmd, stdin=None, stdin_mode='w+b', cb=None, skip_info=False,
             if len(result) > 0:
                 data = result[0].get('data')
                 if data:
-                    m = re.search('Too many rows scanned \(over (\d+)\)', data)
+                    m = re.search(r'Too many rows scanned \(over (\d+)\)', data)
                     if not m:
-                        m = re.search('Request too large \(over (\d+)\)', data)
+                        m = re.search(r'Request too large \(over (\d+)\)', data)
 
                     if m:
                         limit = int(m.group(1))
@@ -1419,7 +1452,7 @@ def wildcard_encode(path):
 
 
 def wildcard_present(path):
-    m = re.search("[*#@%]", path)
+    m = re.search(r"[*#@%]", path)
     return m is not None
 
 
@@ -1489,6 +1522,10 @@ class LargeFileSystem(object):
            file is stored in the large file system and handles all necessary
            steps.
            """
+        # symlinks aren't processed by smudge/clean filters
+        if git_mode == "120000":
+            return (git_mode, contents)
+
         if self.exceedsLargeFileThreshold(relPath, contents) or self.hasLargeFileExtension(relPath):
             contentTempFile = self.generateTempFile(contents)
             pointer_git_mode, contents, localLargeFile = self.generatePointer(contentTempFile)
@@ -1767,7 +1804,7 @@ class P4Submit(Command, P4UserMap):
     status from the script will abort the process.
 
     The purpose of the hook is to edit the message file in place, and it is not
-    supressed by the `--no-verify` option. This hook is called even if
+    suppressed by the `--no-verify` option. This hook is called even if
     `--prepare-p4-only` is set.
 
     The `p4-changelist` hook is executed after the changelist message has been
@@ -2226,7 +2263,7 @@ class P4Submit(Command, P4UserMap):
                                 raw=True):
                             if regexp.search(line):
                                 if verbose:
-                                    print("got keyword match on %s in %s in %s" % (regex.pattern, line, file))
+                                    print("got keyword match on %s in %s in %s" % (regexp.pattern, line, file))
                                 kwfiles[file] = regexp
                                 break
 
@@ -3011,7 +3048,7 @@ class P4Sync(Command, P4UserMap):
             # Preserve everything in relative path name except leading
             # //depot/; just look at first prefix as they all should
             # be in the same depot.
-            depot = re.sub("^(//[^/]+/).*", r'\1', prefixes[0])
+            depot = re.sub(r"^(//[^/]+/).*", r'\1', prefixes[0])
             if p4PathStartsWith(path, depot):
                 path = path[len(depot):]
 
@@ -3148,7 +3185,7 @@ class P4Sync(Command, P4UserMap):
                     raise e
             else:
                 if p4_version_string().find('/NT') >= 0:
-                    text = text.replace(b'\r\n', b'\n')
+                    text = text.replace(b'\x0d\x00\x0a\x00', b'\x0a\x00')
                 contents = [text]
 
         if type_base == "apple":
@@ -3216,17 +3253,19 @@ class P4Sync(Command, P4UserMap):
             if self.stream_have_file_info:
                 if "depotFile" in self.stream_file:
                     f = self.stream_file["depotFile"]
-            # force a failure in fast-import, else an empty
-            # commit will be made
-            self.gitStream.write("\n")
-            self.gitStream.write("die-now\n")
-            self.gitStream.close()
-            # ignore errors, but make sure it exits first
-            self.importProcess.wait()
-            if f:
-                die("Error from p4 print for %s: %s" % (f, err))
-            else:
-                die("Error from p4 print: %s" % err)
+            try:
+                # force a failure in fast-import, else an empty
+                # commit will be made
+                self.gitStream.write("\n")
+                self.gitStream.write("die-now\n")
+                self.gitStream.close()
+                # ignore errors, but make sure it exits first
+                self.importProcess.wait()
+            finally:
+                if f:
+                    die("Error from p4 print for %s: %s" % (f, err))
+                else:
+                    die("Error from p4 print: %s" % err)
 
         if 'depotFile' in marshalled and self.stream_have_file_info:
             # start of a new file - output the old one first
@@ -3566,7 +3605,7 @@ class P4Sync(Command, P4UserMap):
                     commitFound = True
                 else:
                     gitCommit = read_pipe(["git", "rev-list", "--max-count=1",
-                        "--reverse", ":/\[git-p4:.*change = %d\]" % changelist], ignore_error=True)
+                        "--reverse", r":/\[git-p4:.*change = %d\]" % changelist], ignore_error=True)
                     if len(gitCommit) == 0:
                         print("importing label %s: could not find git commit for changelist %d" % (name, changelist))
                     else:
@@ -4145,7 +4184,7 @@ class P4Sync(Command, P4UserMap):
                 if len(self.changesFile) == 0:
                     revision = "#head"
 
-            p = re.sub("\.\.\.$", "", p)
+            p = re.sub(r"\.\.\.$", "", p)
             if not p.endswith("/"):
                 p += "/"
 
@@ -4214,7 +4253,8 @@ class P4Sync(Command, P4UserMap):
         if self.tempBranches != []:
             for branch in self.tempBranches:
                 read_pipe(["git", "update-ref", "-d", branch])
-            os.rmdir(os.path.join(os.environ.get("GIT_DIR", ".git"), self.tempBranchLocation))
+            if len(read_pipe(["git", "for-each-ref", self.tempBranchLocation])) > 0:
+                   die("There are unexpected temporary branches")
 
         # Create a symbolic ref p4/HEAD pointing to p4/<branch> to allow
         # a convenient shortcut refname "p4".
@@ -4254,7 +4294,7 @@ class P4Rebase(Command):
             die("Cannot find upstream branchpoint for rebase")
 
         # the branchpoint may be p4/foo~3, so strip off the parent
-        upstream = re.sub("~[0-9]+$", "", upstream)
+        upstream = re.sub(r"~[0-9]+$", "", upstream)
 
         print("Rebasing the current branch onto %s" % upstream)
         oldHead = read_pipe(["git", "rev-parse", "HEAD"]).strip()
@@ -4283,8 +4323,8 @@ class P4Clone(P4Sync):
     def defaultDestination(self, args):
         # TODO: use common prefix of args?
         depotPath = args[0]
-        depotDir = re.sub("(@[^@]*)$", "", depotPath)
-        depotDir = re.sub("(#[^#]*)$", "", depotDir)
+        depotDir = re.sub(r"(@[^@]*)$", "", depotPath)
+        depotDir = re.sub(r"(#[^#]*)$", "", depotDir)
         depotDir = re.sub(r"\.\.\.$", "", depotDir)
         depotDir = re.sub(r"/$", "", depotDir)
         return os.path.split(depotDir)[1]
@@ -4369,19 +4409,16 @@ class P4Unshelve(Command):
     def renameBranch(self, branch_name):
         """Rename the existing branch to branch_name.N ."""
 
-        found = True
         for i in range(0, 1000):
             backup_branch_name = "{0}.{1}".format(branch_name, i)
             if not gitBranchExists(backup_branch_name):
                 # Copy ref to backup
                 gitUpdateRef(backup_branch_name, branch_name)
                 gitDeleteRef(branch_name)
-                found = True
                 print("renamed old unshelve branch to {0}".format(backup_branch_name))
                 break
-
-        if not found:
-            sys.exit("gave up trying to rename existing branch {0}".format(sync.branch))
+        else:
+            sys.exit("gave up trying to rename existing branch {0}".format(branch_name))
 
     def findLastP4Revision(self, starting_point):
         """Look back from starting_point for the first commit created by git-p4

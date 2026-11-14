@@ -43,7 +43,7 @@ test_expect_success 'enable split index' '
 	git config splitIndex.maxPercentChange 100 &&
 	git update-index --split-index &&
 	test-tool dump-split-index .git/index >actual &&
-	indexversion=$(test-tool index-version <.git/index) &&
+	indexversion=$(git update-index --show-index-version) &&
 
 	# NEEDSWORK: Stop hard-coding checksums.
 	if test "$indexversion" = "4"
@@ -502,7 +502,7 @@ test_expect_success 'do not refresh null base index' '
 		git checkout main &&
 		git update-index --split-index &&
 		test_commit more &&
-		# must not write a new shareindex, or we wont catch the problem
+		# must not write a new shareindex, or we will not catch the problem
 		git -c splitIndex.maxPercentChange=100 merge --no-edit side-branch 2>err &&
 		# i.e. do not expect warnings like
 		# could not freshen shared index .../shareindex.00000...
@@ -527,7 +527,7 @@ test_expect_success 'reading split index at alternate location' '
 
 	# ... and, for backwards compatibility, in the current GIT_DIR
 	# as well.
-	mv -v ./reading-alternate-location/.git/sharedindex.* .git &&
+	mv ./reading-alternate-location/.git/sharedindex.* .git &&
 	GIT_INDEX_FILE=./reading-alternate-location/.git/index \
 	git ls-files --cached >actual &&
 	test_cmp expect actual

@@ -9,7 +9,7 @@ test_expect_success 'setup a submodule' '
 	: >pretzel/a &&
 	git -C pretzel add a &&
 	git -C pretzel commit -m "add a file" -- a &&
-	git submodule add ./pretzel sub &&
+	git -c protocol.file.allow=always submodule add ./pretzel sub &&
 	git commit -a -m "add submodule" &&
 	git submodule deinit --all
 '
@@ -26,7 +26,7 @@ test_expect_success 'error message for path inside submodule' '
 
 test_expect_success 'error message for path inside submodule from within submodule' '
 	test_must_fail git -C sub add . 2>actual &&
-	test_i18ngrep "in unpopulated submodule" actual
+	test_grep "in unpopulated submodule" actual
 '
 
 test_done

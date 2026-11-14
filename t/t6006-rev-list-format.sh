@@ -12,21 +12,41 @@ export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 . "$TEST_DIRECTORY"/lib-terminal.sh
 
 test_tick
-# Tested non-UTF-8 encoding
-test_encoding="ISO8859-1"
 
-# String "added" in German
-# (translated with Google Translate),
-# encoded in UTF-8, used as a commit log message below.
-added_utf8_part=$(printf "\303\274")
-added_utf8_part_iso88591=$(echo "$added_utf8_part" | iconv -f utf-8 -t $test_encoding)
-added=$(printf "added (hinzugef${added_utf8_part}gt) foo")
-added_iso88591=$(echo "$added" | iconv -f utf-8 -t $test_encoding)
-# same but "changed"
-changed_utf8_part=$(printf "\303\244")
-changed_utf8_part_iso88591=$(echo "$changed_utf8_part" | iconv -f utf-8 -t $test_encoding)
-changed=$(printf "changed (ge${changed_utf8_part}ndert) foo")
-changed_iso88591=$(echo "$changed" | iconv -f utf-8 -t $test_encoding)
+if test_have_prereq ICONV
+then
+	# Tested non-UTF-8 encoding
+	test_encoding="ISO8859-1"
+
+	# String "added" in German
+	# (translated with Google Translate),
+	# encoded in UTF-8, used as a commit log message below.
+	added_utf8_part=$(printf "\303\274")
+	added_utf8_part_iso88591=$(echo "$added_utf8_part" | iconv -f utf-8 -t $test_encoding)
+	added=$(printf "added (hinzugef${added_utf8_part}gt) foo")
+	added_iso88591=$(echo "$added" | iconv -f utf-8 -t $test_encoding)
+	# same but "changed"
+	changed_utf8_part=$(printf "\303\244")
+	changed_utf8_part_iso88591=$(echo "$changed_utf8_part" | iconv -f utf-8 -t $test_encoding)
+	changed=$(printf "changed (ge${changed_utf8_part}ndert) foo")
+	changed_iso88591=$(echo "$changed" | iconv -f utf-8 -t $test_encoding)
+else
+	# Tested non-UTF-8 encoding
+	test_encoding="UTF-8"
+
+	# String "added" in German
+	# (translated with Google Translate),
+	# encoded in UTF-8, used as a commit log message below.
+	added_utf8_part="u"
+	added_utf8_part_iso88591="u"
+	added=$(printf "added (hinzugef${added_utf8_part}gt) foo")
+	added_iso88591="$added"
+	# same but "changed"
+	changed_utf8_part="a"
+	changed_utf8_part_iso88591="a"
+	changed=$(printf "changed (ge${changed_utf8_part}ndert) foo")
+	changed_iso88591="$changed"
+fi
 
 # Count of char to truncate
 # Number is chosen so, that non-ACSII characters
@@ -54,7 +74,7 @@ test_expect_success 'setup' '
 	git config --unset i18n.commitEncoding
 '
 
-# usage: test_format [argument...] name format_string [failure] <expected_output
+# usage: test_format [argument...] name format_string [success|failure] [prereq] <expected_output
 test_format () {
 	local args=
 	while true
@@ -68,7 +88,7 @@ test_format () {
 		esac
 	done
 	cat >expect.$1
-	test_expect_${3:-success} "format $1" "
+	test_expect_${3:-success} $4 "format $1" "
 		git rev-list $args --pretty=format:'$2' main >output.$1 &&
 		test_cmp expect.$1 output.$1
 	"
@@ -197,7 +217,7 @@ Thu, 7 Apr 2005 15:13:13 -0700
 1112911993
 EOF
 
-test_format encoding %e <<EOF
+test_format encoding %e success ICONV <<EOF
 commit $head2
 $test_encoding
 commit $head1
@@ -358,22 +378,30 @@ test_expect_success 'rev-list %C(auto,...) respects --color' '
 	test_cmp expect actual
 '
 
-iconv -f utf-8 -t $test_encoding > commit-msg <<EOF
-Test printing of complex bodies
-
-This commit message is much longer than the others,
-and it will be encoded in $test_encoding. We should therefore
-include an ISO8859 character: ¡bueno!
-EOF
-
 test_expect_success 'setup complex body' '
+	message=$(cat <<-EOF
+	Test printing of complex bodies
+
+	This commit message is much longer than the others,
+	and it will be encoded in $test_encoding. We should therefore
+	include an ISO8859 character: ¡bueno!
+	EOF
+	) &&
+
+	if test_have_prereq ICONV
+	then
+		echo "$message" | iconv -f utf-8 -t $test_encoding >commit-msg
+	else
+		echo "$message" >commit-msg
+	fi &&
+
 	git config i18n.commitencoding $test_encoding &&
 	echo change2 >foo && git commit -a -F commit-msg &&
 	head3=$(git rev-parse --verify HEAD) &&
 	head3_short=$(git rev-parse --short $head3)
 '
 
-test_format complex-encoding %e <<EOF
+test_format complex-encoding %e success ICONV <<EOF
 commit $head3
 $test_encoding
 commit $head2
@@ -428,7 +456,12 @@ test_expect_success 'setup expected messages (for test %b)' '
 	commit $head2
 	commit $head1
 	EOF
-	iconv -f utf-8 -t $test_encoding expected.utf-8 >expected.ISO8859-1
+	if test_have_prereq ICONV
+	then
+		iconv -f utf-8 -t $test_encoding expected.utf-8 >expected.ISO8859-1
+	else
+		cp expected.utf-8 expected.ISO8859-1
+	fi
 '
 
 test_format complex-body %b <expected.ISO8859-1
@@ -493,7 +526,7 @@ test_expect_success 'empty email' '
 	test_tick &&
 	C=$(GIT_AUTHOR_EMAIL= git commit-tree HEAD^{tree} </dev/null) &&
 	A=$(git show --pretty=format:%an,%ae,%ad%n -s $C) &&
-	verbose test "$A" = "$GIT_AUTHOR_NAME,,Thu Apr 7 15:14:13 2005 -0700"
+	test "$A" = "$GIT_AUTHOR_NAME,,Thu Apr 7 15:14:13 2005 -0700"
 '
 
 test_expect_success 'del LF before empty (1)' '
@@ -504,7 +537,7 @@ test_expect_success 'del LF before empty (1)' '
 test_expect_success 'del LF before empty (2)' '
 	git show -s --pretty=format:"%s%n%-b%nThanks%n" HEAD >actual &&
 	test_line_count = 6 actual &&
-	grep "^$" actual
+	test_grep "^$" actual
 '
 
 test_expect_success 'add LF before non-empty (1)' '
@@ -515,7 +548,7 @@ test_expect_success 'add LF before non-empty (1)' '
 test_expect_success 'add LF before non-empty (2)' '
 	git show -s --pretty=format:"%s%+b%nThanks%n" HEAD >actual &&
 	test_line_count = 6 actual &&
-	grep "^$" actual
+	test_grep "^$" actual
 '
 
 test_expect_success 'add SP before non-empty (1)' '

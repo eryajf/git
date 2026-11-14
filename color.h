@@ -73,10 +73,12 @@ struct strbuf;
  * returned from git_config_colorbool. The "auto" value can be returned from
  * config_colorbool, and will be converted by want_color() into either 0 or 1.
  */
-#define GIT_COLOR_UNKNOWN -1
-#define GIT_COLOR_NEVER  0
-#define GIT_COLOR_ALWAYS 1
-#define GIT_COLOR_AUTO   2
+enum git_colorbool {
+	GIT_COLOR_UNKNOWN = -1,
+	GIT_COLOR_NEVER = 0,
+	GIT_COLOR_ALWAYS = 1,
+	GIT_COLOR_AUTO = 2,
+};
 
 /* A default list of colors to use for commit graphs and show-branch output */
 extern const char *column_colors_ansi[];
@@ -88,12 +90,8 @@ extern const int column_colors_ansi_max;
  */
 extern int color_stdout_is_tty;
 
-/*
- * Use the first one if you need only color config; the second is a convenience
- * if you are just going to change to git_default_config, too.
- */
+/* Parse color config. */
 int git_color_config(const char *var, const char *value, void *cb);
-int git_color_default_config(const char *var, const char *value, void *cb);
 
 /*
  * Parse a config option, which can be a boolean or one of
@@ -102,13 +100,13 @@ int git_color_default_config(const char *var, const char *value, void *cb);
  * GIT_COLOR_ALWAYS for "always" or a positive boolean,
  * and GIT_COLOR_AUTO for "auto".
  */
-int git_config_colorbool(const char *var, const char *value);
+enum git_colorbool git_config_colorbool(const char *var, const char *value);
 
 /*
  * Return a boolean whether to use color, where the argument 'var' is
  * one of GIT_COLOR_UNKNOWN, GIT_COLOR_NEVER, GIT_COLOR_ALWAYS, GIT_COLOR_AUTO.
  */
-int want_color_fd(int fd, int var);
+bool want_color_fd(int fd, enum git_colorbool var);
 #define want_color(colorbool) want_color_fd(1, (colorbool))
 #define want_color_stderr(colorbool) want_color_fd(2, (colorbool))
 
@@ -116,9 +114,11 @@ int want_color_fd(int fd, int var);
  * Translate a Git color from 'value' into a string that the terminal can
  * interpret and store it into 'dst'. The Git color values are of the form
  * "foreground [background] [attr]" where fore- and background can be a color
- * name ("red"), a RGB code (#0xFF0000) or a 256-color-mode from the terminal.
+ * name ("red"), a RGB code (#FF0000 or #F00) or a 256-color-mode from the
+ * terminal.
  */
 int color_parse(const char *value, char *dst);
+int color_parse_quietly(const char *value, char *dst);
 int color_parse_mem(const char *value, int len, char *dst);
 
 /*

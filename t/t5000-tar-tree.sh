@@ -105,6 +105,18 @@ check_added() {
 	'
 }
 
+check_mtime() {
+	dir=$1
+	path_in_archive=$2
+	mtime=$3
+
+	test_expect_success " validate mtime of $path_in_archive" '
+		test-tool chmtime --get $dir/$path_in_archive >actual.mtime &&
+		echo $mtime >expect.mtime &&
+		test_cmp expect.mtime actual.mtime
+	'
+}
+
 test_expect_success 'setup' '
 	test_oid_cache <<-EOF
 	obj sha1:19f9c8273ec45a8938e6999cb59b3ff66739902a
@@ -112,8 +124,20 @@ test_expect_success 'setup' '
 	EOF
 '
 
+test_expect_success '--list notices extra parameters' '
+	test_must_fail git archive --list blah &&
+	test_must_fail git archive --remote=. --list blah
+'
+
+test_expect_success 'end-of-options is correctly eaten' '
+	git archive --list --end-of-options &&
+	git archive --remote=. --list --end-of-options
+'
+
 test_expect_success 'populate workdir' '
 	mkdir a &&
+	echo "a files_named_a" >.gitattributes &&
+	git add .gitattributes &&
 	echo simple textfile >a/a &&
 	ten=0123456789 &&
 	hundred="$ten$ten$ten$ten$ten$ten$ten$ten$ten$ten" &&
@@ -173,6 +197,14 @@ test_expect_success 'git archive' '
 '
 
 check_tar b
+check_mtime b a/a 1117231200
+
+test_expect_success 'git archive --mtime' '
+	git archive --mtime=2002-02-02T02:02:02-0200 HEAD >with_mtime.tar
+'
+
+check_tar with_mtime
+check_mtime with_mtime a/a 1012622522
 
 test_expect_success 'git archive --prefix=prefix/' '
 	git archive --prefix=prefix/ HEAD >with_prefix.tar
@@ -238,14 +270,6 @@ test_expect_success 'git archive --remote with configured remote' '
 	test_cmp_bin b.tar b5-nick.tar
 '
 
-test_expect_success 'validate file modification time' '
-	mkdir extract &&
-	"$TAR" xf b.tar -C extract a/a &&
-	test-tool chmtime --get extract/a/a >b.mtime &&
-	echo "1117231200" >expected.mtime &&
-	test_cmp expected.mtime b.mtime
-'
-
 test_expect_success 'git get-tar-commit-id' '
 	git get-tar-commit-id <b.tar >actual &&
 	git rev-parse HEAD >expect &&
@@ -299,14 +323,14 @@ test_expect_success 'setup tar filters' '
 
 test_expect_success 'archive --list mentions user filter' '
 	git archive --list >output &&
-	grep "^tar\.foo\$" output &&
-	grep "^bar\$" output
+	test_grep "^tar\.foo\$" output &&
+	test_grep "^bar\$" output
 '
 
 test_expect_success 'archive --list shows only enabled remote filters' '
 	git archive --list --remote=. >output &&
-	! grep "^tar\.foo\$" output &&
-	grep "^bar\$" output
+	test_grep ! "^tar\.foo\$" output &&
+	test_grep "^bar\$" output
 '
 
 test_expect_success 'invoke tar filter by format' '
@@ -340,6 +364,13 @@ test_expect_success 'only enabled filters are available remotely' '
 		>remote.tar.foo &&
 	git archive --remote=. --format=bar >remote.bar HEAD &&
 	test_cmp_bin remote.bar config.bar
+'
+
+test_expect_success 'invalid filter is reported only once' '
+	test_must_fail git -c tar.invalid.command= archive --format=invalid \
+		HEAD >out 2>err &&
+	test_must_be_empty out &&
+	test_line_count = 1 err
 '
 
 test_expect_success 'git archive --format=tgz' '
@@ -395,16 +426,39 @@ test_expect_success GZIP 'extract tgz file (external gzip)' '
 
 test_expect_success 'archive and :(glob)' '
 	git archive -v HEAD -- ":(glob)**/sh" >/dev/null 2>actual &&
-	cat >expect <<EOF &&
-a/
-a/bin/
-a/bin/sh
-EOF
+	cat >expect <<-\EOF &&
+	a/
+	a/bin/
+	a/bin/sh
+	EOF
 	test_cmp expect actual
 '
 
 test_expect_success 'catch non-matching pathspec' '
 	test_must_fail git archive -v HEAD -- "*.abc" >/dev/null
+'
+
+test_expect_success 'reject paths outside the current directory' '
+	test_must_fail git -C a/bin archive HEAD .. >/dev/null 2>err &&
+	test_grep "outside the current directory" err
+'
+
+test_expect_success 'allow pathspecs that resolve to the current directory' '
+	git -C a/bin archive -v HEAD ../bin >/dev/null 2>actual &&
+	cat >expect <<-\EOF &&
+	sh
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'attr pathspec in bare repo' '
+	test_expect_code 0 git --git-dir=bare.git archive -v HEAD \
+		":(attr:files_named_a)" >/dev/null 2>actual &&
+	cat >expect <<-\EOF &&
+	a/
+	a/a
+	EOF
+	test_cmp expect actual
 '
 
 # Pull the size and date of each entry in a tarfile using the system tar.
@@ -449,8 +503,8 @@ test_expect_success LONG_IS_64BIT 'set up repository with huge blob' '
 # would generate the whole 64GB).
 test_expect_success LONG_IS_64BIT 'generate tar with huge size' '
 	{
-		git archive HEAD
-		echo $? >exit-code
+		{ ret=0 && git archive HEAD || ret=$?; } &&
+		echo "$ret" >exit-code
 	} | test_copy_bytes 4096 >huge.tar &&
 	echo 141 >expect &&
 	test_cmp expect exit-code

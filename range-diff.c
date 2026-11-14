@@ -1,5 +1,11 @@
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
+#include "environment.h"
+#include "gettext.h"
 #include "range-diff.h"
+#include "object-name.h"
 #include "string-list.h"
 #include "run-command.h"
 #include "strvec.h"
@@ -8,7 +14,9 @@
 #include "linear-assignment.h"
 #include "diffcore.h"
 #include "commit.h"
+#include "pager.h"
 #include "pretty.h"
+#include "repository.h"
 #include "userdiff.h"
 #include "apply.h"
 #include "revision.h"
@@ -31,7 +39,8 @@ struct patch_util {
  * as struct object_id (will need to be free()d).
  */
 static int read_patches(const char *range, struct string_list *list,
-			const struct strvec *other_arg)
+			const struct strvec *log_arg,
+			unsigned int include_merges)
 {
 	struct child_process cp = CHILD_PROCESS_INIT;
 	struct strbuf buf = STRBUF_INIT, contents = STRBUF_INIT;
@@ -42,7 +51,7 @@ static int read_patches(const char *range, struct string_list *list,
 	size_t size;
 	int ret = -1;
 
-	strvec_pushl(&cp.args, "log", "--no-color", "-p", "--no-merges",
+	strvec_pushl(&cp.args, "log", "--no-color", "-p",
 		     "--reverse", "--date-order", "--decorate=no",
 		     "--no-prefix", "--submodule=short",
 		     /*
@@ -55,11 +64,13 @@ static int read_patches(const char *range, struct string_list *list,
 		     "--output-indicator-context=#",
 		     "--no-abbrev-commit",
 		     "--pretty=medium",
-		     "--notes",
+		     "--show-notes-by-default",
 		     NULL);
-	if (other_arg)
-		strvec_pushv(&cp.args, other_arg->v);
+	if (!include_merges)
+		strvec_push(&cp.args, "--no-merges");
 	strvec_push(&cp.args, range);
+	if (log_arg)
+		strvec_pushv(&cp.args, log_arg->v);
 	cp.out = -1;
 	cp.no_stdin = 1;
 	cp.git_cmd = 1;
@@ -77,7 +88,7 @@ static int read_patches(const char *range, struct string_list *list,
 	line = contents.buf;
 	size = contents.len;
 	for (; size > 0; size -= len, line += len) {
-		const char *p;
+		char *p;
 		char *eol;
 
 		eol = memchr(line, '\n', size);
@@ -89,12 +100,15 @@ static int read_patches(const char *range, struct string_list *list,
 		}
 
 		if (skip_prefix(line, "commit ", &p)) {
+			char *q;
 			if (util) {
 				string_list_append(list, buf.buf)->util = util;
 				strbuf_reset(&buf);
 			}
 			CALLOC_ARRAY(util, 1);
-			if (get_oid(p, &util->oid)) {
+			if (include_merges && (q = strstr(p, " (from ")))
+				*q = '\0';
+			if (repo_get_oid(the_repository, p, &util->oid)) {
 				error(_("could not parse commit '%s'"), p);
 				FREE_AND_NULL(util);
 				string_list_clear(list, 1);
@@ -126,7 +140,7 @@ static int read_patches(const char *range, struct string_list *list,
 			if (eol)
 				*eol = '\n';
 			orig_len = len;
-			len = parse_git_diff_header(&root, &linenr, 0, line,
+			len = parse_git_diff_header(&root, NULL, &linenr, 0, line,
 						    len, size, &patch);
 			if (len < 0) {
 				error(_("could not parse git header '%.*s'"),
@@ -224,15 +238,20 @@ cleanup:
 	return ret;
 }
 
-static int patch_util_cmp(const void *dummy, const struct patch_util *a,
-			  const struct patch_util *b, const char *keydata)
+static int patch_util_cmp(const void *cmp_data UNUSED,
+			  const struct hashmap_entry *ha,
+			  const struct hashmap_entry *hb,
+			  const void *keydata)
 {
+	const struct patch_util
+		*a = container_of(ha, const struct patch_util, e),
+		*b = container_of(hb, const struct patch_util, e);
 	return strcmp(a->diff, keydata ? keydata : b->diff);
 }
 
 static void find_exact_matches(struct string_list *a, struct string_list *b)
 {
-	struct hashmap map = HASHMAP_INIT((hashmap_cmp_fn)patch_util_cmp, NULL);
+	struct hashmap map = HASHMAP_INIT(patch_util_cmp, NULL);
 	int i;
 
 	/* First, add the patches of a to a hash map */
@@ -267,14 +286,18 @@ static void find_exact_matches(struct string_list *a, struct string_list *b)
 	hashmap_clear(&map);
 }
 
-static int diffsize_consume(void *data, char *line, unsigned long len)
+static int diffsize_consume(void *data,
+			     char *line UNUSED,
+			     unsigned long len UNUSED)
 {
 	(*(int *)data)++;
 	return 0;
 }
 
-static void diffsize_hunk(void *data, long ob, long on, long nb, long nn,
-			  const char *funcline, long funclen)
+static void diffsize_hunk(void *data,
+			  long ob UNUSED, long on UNUSED,
+			  long nb UNUSED, long nn UNUSED,
+			  const char *func UNUSED, long funclen UNUSED)
 {
 	diffsize_consume(data, NULL, 0);
 }
@@ -302,13 +325,24 @@ static int diffsize(const char *a, const char *b)
 }
 
 static void get_correspondences(struct string_list *a, struct string_list *b,
-				int creation_factor)
+				int creation_factor, size_t max_memory)
 {
 	int n = a->nr + b->nr;
 	int *cost, c, *a2b, *b2a;
 	int i, j;
-
-	ALLOC_ARRAY(cost, st_mult(n, n));
+	size_t cost_size = st_mult(n, n);
+	size_t cost_bytes = st_mult(sizeof(int), cost_size);
+	if (cost_bytes >= max_memory) {
+		struct strbuf cost_str = STRBUF_INIT;
+		struct strbuf max_str = STRBUF_INIT;
+		strbuf_humanise_bytes(&cost_str, cost_bytes);
+		strbuf_humanise_bytes(&max_str, max_memory);
+		die(_("range-diff: unable to compute the range-diff, since it "
+		      "exceeds the maximum memory for the cost matrix: %s "
+		      "(%"PRIuMAX" bytes) needed, limited to %s (%"PRIuMAX" bytes)"),
+		    cost_str.buf, (uintmax_t)cost_bytes, max_str.buf, (uintmax_t)max_memory);
+	}
+	ALLOC_ARRAY(cost, cost_size);
 	ALLOC_ARRAY(a2b, n);
 	ALLOC_ARRAY(b2a, n);
 
@@ -377,11 +411,14 @@ static void output_pair_header(struct diff_options *diffopt,
 	const char *color_new = diff_get_color_opt(diffopt, DIFF_FILE_NEW);
 	const char *color_commit = diff_get_color_opt(diffopt, DIFF_COMMIT);
 	const char *color;
+	int abbrev = diffopt->abbrev;
+
+	if (abbrev < 0)
+		abbrev = DEFAULT_ABBREV;
 
 	if (!dashes->len)
 		strbuf_addchars(dashes, '-',
-				strlen(find_unique_abbrev(oid,
-							  DEFAULT_ABBREV)));
+				strlen(repo_find_unique_abbrev(diffopt->repo, oid, abbrev)));
 
 	if (!b_util) {
 		color = color_old;
@@ -403,7 +440,7 @@ static void output_pair_header(struct diff_options *diffopt,
 		strbuf_addf(buf, "%*s:  %s ", patch_no_width, "-", dashes->buf);
 	else
 		strbuf_addf(buf, "%*d:  %s ", patch_no_width, a_util->i + 1,
-			    find_unique_abbrev(&a_util->oid, DEFAULT_ABBREV));
+			    repo_find_unique_abbrev(diffopt->repo, &a_util->oid, abbrev));
 
 	if (status == '!')
 		strbuf_addf(buf, "%s%s", color_reset, color);
@@ -415,9 +452,9 @@ static void output_pair_header(struct diff_options *diffopt,
 		strbuf_addf(buf, " %*s:  %s", patch_no_width, "-", dashes->buf);
 	else
 		strbuf_addf(buf, " %*d:  %s", patch_no_width, b_util->i + 1,
-			    find_unique_abbrev(&b_util->oid, DEFAULT_ABBREV));
+			    repo_find_unique_abbrev(diffopt->repo, &b_util->oid, abbrev));
 
-	commit = lookup_commit_reference(the_repository, oid);
+	commit = lookup_commit_reference(diffopt->repo, oid);
 	if (commit) {
 		if (status == '!')
 			strbuf_addf(buf, "%s%s", color_reset, color);
@@ -431,15 +468,18 @@ static void output_pair_header(struct diff_options *diffopt,
 }
 
 static struct userdiff_driver section_headers = {
-	.funcname = { "^ ## (.*) ##$\n"
-		      "^.?@@ (.*)$", REG_EXTENDED }
+	.funcname = {
+		.pattern = "^ ## (.*) ##$\n^.?@@ (.*)$",
+		.cflags = REG_EXTENDED,
+	},
 };
 
-static struct diff_filespec *get_filespec(const char *name, const char *p)
+static struct diff_filespec *get_filespec(const struct git_hash_algo *algop,
+					  const char *name, const char *p)
 {
 	struct diff_filespec *spec = alloc_filespec(name);
 
-	fill_filespec(spec, null_oid(), 0, 0100644);
+	fill_filespec(spec, null_oid(algop), 0, 0100644);
 	spec->data = (char *)p;
 	spec->size = strlen(p);
 	spec->should_munmap = 0;
@@ -453,13 +493,14 @@ static void patch_diff(const char *a, const char *b,
 		       struct diff_options *diffopt)
 {
 	diff_queue(&diff_queued_diff,
-		   get_filespec("a", a), get_filespec("b", b));
+		   get_filespec(diffopt->repo->hash_algo, "a", a),
+		   get_filespec(diffopt->repo->hash_algo, "b", b));
 
 	diffcore_std(diffopt);
 	diff_flush(diffopt);
 }
 
-static struct strbuf *output_prefix_cb(struct diff_options *opt, void *data)
+static const char *output_prefix_cb(struct diff_options *opt UNUSED, void *data)
 {
 	return data;
 }
@@ -476,7 +517,7 @@ static void output(struct string_list *a, struct string_list *b,
 	if (range_diff_opts->diffopt)
 		memcpy(&opts, range_diff_opts->diffopt, sizeof(opts));
 	else
-		diff_setup(&opts);
+		repo_diff_setup(the_repository, &opts);
 
 	opts.no_free = 1;
 	if (!opts.output_format)
@@ -487,7 +528,7 @@ static void output(struct string_list *a, struct string_list *b,
 	opts.flags.suppress_hunk_header_line_count = 1;
 	opts.output_prefix = output_prefix_cb;
 	strbuf_addstr(&indent, "    ");
-	opts.output_prefix_data = &indent;
+	opts.output_prefix_data = indent.buf;
 	diff_setup_done(&opts);
 
 	/*
@@ -550,19 +591,21 @@ int show_range_diff(const char *range1, const char *range2,
 
 	struct string_list branch1 = STRING_LIST_INIT_DUP;
 	struct string_list branch2 = STRING_LIST_INIT_DUP;
+	unsigned int include_merges = range_diff_opts->include_merges;
 
 	if (range_diff_opts->left_only && range_diff_opts->right_only)
 		res = error(_("options '%s' and '%s' cannot be used together"), "--left-only", "--right-only");
 
-	if (!res && read_patches(range1, &branch1, range_diff_opts->other_arg))
+	if (!res && read_patches(range1, &branch1, range_diff_opts->log_arg, include_merges))
 		res = error(_("could not parse log for '%s'"), range1);
-	if (!res && read_patches(range2, &branch2, range_diff_opts->other_arg))
+	if (!res && read_patches(range2, &branch2, range_diff_opts->log_arg, include_merges))
 		res = error(_("could not parse log for '%s'"), range2);
 
 	if (!res) {
 		find_exact_matches(&branch1, &branch2);
 		get_correspondences(&branch1, &branch2,
-				    range_diff_opts->creation_factor);
+				    range_diff_opts->creation_factor,
+				    range_diff_opts->max_memory);
 		output(&branch1, &branch2, range_diff_opts);
 	}
 
@@ -579,7 +622,7 @@ int is_range_diff_range(const char *arg)
 	int i, positive = 0, negative = 0;
 	struct rev_info revs;
 
-	init_revisions(&revs, NULL);
+	repo_init_revisions(the_repository, &revs, NULL);
 	if (setup_revisions(3, argv, &revs, NULL) == 1) {
 		for (i = 0; i < revs.pending.nr; i++)
 			if (revs.pending.objects[i].item->flags & UNINTERESTING)

@@ -52,18 +52,18 @@ test_expect_success 'merge c1 with c2, c3, c4, c5' '
 	test "$(git rev-parse c3)" = "$(git rev-parse HEAD^3)" &&
 	test "$(git rev-parse c5)" = "$(git rev-parse HEAD^4)" &&
 	git diff --exit-code &&
-	test -f c0.c &&
-	test -f c1.c &&
-	test -f c2.c &&
-	test -f c3.c &&
-	test -f c4.c &&
-	test -f c5.c &&
+	test_path_is_file c0.c &&
+	test_path_is_file c1.c &&
+	test_path_is_file c2.c &&
+	test_path_is_file c3.c &&
+	test_path_is_file c4.c &&
+	test_path_is_file c5.c &&
 	git show --format=%s -s >actual &&
-	! grep c1 actual &&
-	grep c2 actual &&
-	grep c3 actual &&
-	! grep c4 actual &&
-	grep c5 actual
+	test_grep ! c1 actual &&
+	test_grep c2 actual &&
+	test_grep c3 actual &&
+	test_grep ! c4 actual &&
+	test_grep c5 actual
 '
 
 test_expect_success 'pull c2, c3, c4, c5 into c1' '
@@ -75,18 +75,18 @@ test_expect_success 'pull c2, c3, c4, c5 into c1' '
 	test "$(git rev-parse c3)" = "$(git rev-parse HEAD^3)" &&
 	test "$(git rev-parse c5)" = "$(git rev-parse HEAD^4)" &&
 	git diff --exit-code &&
-	test -f c0.c &&
-	test -f c1.c &&
-	test -f c2.c &&
-	test -f c3.c &&
-	test -f c4.c &&
-	test -f c5.c &&
+	test_path_is_file c0.c &&
+	test_path_is_file c1.c &&
+	test_path_is_file c2.c &&
+	test_path_is_file c3.c &&
+	test_path_is_file c4.c &&
+	test_path_is_file c5.c &&
 	git show --format=%s -s >actual &&
-	! grep c1 actual &&
-	grep c2 actual &&
-	grep c3 actual &&
-	! grep c4 actual &&
-	grep c5 actual
+	test_grep ! c1 actual &&
+	test_grep c2 actual &&
+	test_grep c3 actual &&
+	test_grep ! c4 actual &&
+	test_grep c5 actual
 '
 
 test_expect_success 'setup' '

@@ -31,10 +31,16 @@ test_pull_autostash_fail () {
 	echo dirty >new_file &&
 	git add new_file &&
 	test_must_fail git pull "$@" . copy 2>err &&
-	test_i18ngrep -E "uncommitted changes.|overwritten by merge:" err
+	test_grep -E "uncommitted changes.|overwritten by merge:" err
 }
 
 test_expect_success setup '
+	# Commit dates are hardcoded to 2005, and the reflog entries will have
+	# a matching timestamp. Maintenance may thus immediately expire
+	# reflogs if it was running.
+	git config set gc.reflogExpire never &&
+	git config set gc.reflogExpireUnreachable never &&
+
 	echo file >file &&
 	git add file &&
 	git commit -a -m original
@@ -151,7 +157,7 @@ test_expect_success 'fail if wildcard spec does not match any refs' '
 	echo file >expect &&
 	test_cmp expect file &&
 	test_must_fail git pull . "refs/nonexisting1/*:refs/nonexisting2/*" 2>err &&
-	test_i18ngrep "no candidates for merging" err &&
+	test_grep "no candidates for merging" err &&
 	test_cmp expect file
 '
 
@@ -164,7 +170,7 @@ test_expect_success 'fail if no branches specified with non-default remote' '
 	test_cmp expect file &&
 	test_config branch.test.remote origin &&
 	test_must_fail git pull test_remote 2>err &&
-	test_i18ngrep "specify a branch on the command line" err &&
+	test_grep "specify a branch on the command line" err &&
 	test_cmp expect file
 '
 
@@ -176,7 +182,7 @@ test_expect_success 'fail if not on a branch' '
 	echo file >expect &&
 	test_cmp expect file &&
 	test_must_fail git pull 2>err &&
-	test_i18ngrep "not currently on a branch" err &&
+	test_grep "not currently on a branch" err &&
 	test_cmp expect file
 '
 
@@ -189,7 +195,7 @@ test_expect_success 'fail if no configuration for current branch' '
 	echo file >expect &&
 	test_cmp expect file &&
 	test_must_fail git pull 2>err &&
-	test_i18ngrep "no tracking information" err &&
+	test_grep "no tracking information" err &&
 	test_cmp expect file
 '
 
@@ -202,7 +208,7 @@ test_expect_success 'pull --all: fail if no configuration for current branch' '
 	echo file >expect &&
 	test_cmp expect file &&
 	test_must_fail git pull --all 2>err &&
-	test_i18ngrep "There is no tracking information" err &&
+	test_grep "There is no tracking information" err &&
 	test_cmp expect file
 '
 
@@ -214,8 +220,25 @@ test_expect_success 'fail if upstream branch does not exist' '
 	echo file >expect &&
 	test_cmp expect file &&
 	test_must_fail git pull 2>err &&
-	test_i18ngrep "no such ref was fetched" err &&
+	test_grep "no such ref was fetched" err &&
 	test_cmp expect file
+'
+
+test_expect_success 'fetch upstream branch even if refspec excludes it' '
+	# the branch names are not important here except that
+	# the first one must not be a prefix of the second,
+	# since otherwise the ref-prefix protocol extension
+	# would match both
+	git branch in-refspec HEAD^ &&
+	git branch not-in-refspec HEAD &&
+	git init -b in-refspec downstream &&
+	git -C downstream remote add -t in-refspec origin "file://$(pwd)/.git" &&
+	git -C downstream config branch.in-refspec.remote origin &&
+	git -C downstream config branch.in-refspec.merge refs/heads/not-in-refspec &&
+	git -C downstream pull &&
+	git rev-parse --verify not-in-refspec >expect &&
+	git -C downstream rev-parse --verify HEAD >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'fail if the index has unresolved entries' '
@@ -231,13 +254,13 @@ test_expect_success 'fail if the index has unresolved entries' '
 	test_file_not_empty unmerged &&
 	cp file expected &&
 	test_must_fail git pull . second 2>err &&
-	test_i18ngrep "Pulling is not possible because you have unmerged files." err &&
+	test_grep "Pulling is not possible because you have unmerged files." err &&
 	test_cmp expected file &&
 	git add file &&
 	git ls-files -u >unmerged &&
 	test_must_be_empty unmerged &&
 	test_must_fail git pull . second 2>err &&
-	test_i18ngrep "You have not concluded your merge" err &&
+	test_grep "You have not concluded your merge" err &&
 	test_cmp expected file
 '
 
@@ -247,7 +270,7 @@ test_expect_success 'fast-forwards working tree if branch head is updated' '
 	echo file >expect &&
 	test_cmp expect file &&
 	git pull . second:third 2>err &&
-	test_i18ngrep "fetch updated the current branch head" err &&
+	test_grep "fetch updated the current branch head" err &&
 	echo modified >expect &&
 	test_cmp expect file &&
 	test_cmp_rev third second
@@ -260,7 +283,7 @@ test_expect_success 'fast-forward fails with conflicting work tree' '
 	test_cmp expect file &&
 	echo conflict >file &&
 	test_must_fail git pull . second:third 2>err &&
-	test_i18ngrep "Cannot fast-forward your working tree" err &&
+	test_grep "Cannot fast-forward your working tree" err &&
 	echo conflict >expect &&
 	test_cmp expect file &&
 	test_cmp_rev third second
@@ -339,8 +362,8 @@ test_expect_success '--rebase with rebase.autostash succeeds on ff' '
 	echo "dirty" >>dst/file &&
 	test_config -C dst rebase.autostash true &&
 	git -C dst pull --rebase >actual 2>&1 &&
-	grep -q "Fast-forward" actual &&
-	grep -q "Applied autostash." actual
+	test_grep -q "Fast-forward" actual &&
+	test_grep -q "Applied autostash." actual
 '
 
 test_expect_success '--rebase with conflicts shows advice' '
@@ -358,7 +381,7 @@ test_expect_success '--rebase with conflicts shows advice' '
 	test_tick &&
 	git commit -m "Create conflict" seq.txt &&
 	test_must_fail git pull --rebase . seq 2>err >out &&
-	test_i18ngrep "Resolve all conflicts manually" err
+	test_grep "Resolve all conflicts manually" err
 '
 
 test_expect_success 'failed --rebase shows advice' '
@@ -372,14 +395,14 @@ test_expect_success 'failed --rebase shows advice' '
 	git checkout -f -b fails-to-rebase HEAD^ &&
 	test_commit v2-without-cr file "2" file2-lf &&
 	test_must_fail git pull --rebase . diverging 2>err >out &&
-	test_i18ngrep "Resolve all conflicts manually" err
+	test_grep "Resolve all conflicts manually" err
 '
 
 test_expect_success '--rebase fails with multiple branches' '
 	git reset --hard before-rebase &&
 	test_must_fail git pull --rebase . copy main 2>err &&
 	test_cmp_rev HEAD before-rebase &&
-	test_i18ngrep "Cannot rebase onto multiple branches" err &&
+	test_grep "Cannot rebase onto multiple branches" err &&
 	echo modified >expect &&
 	git show HEAD:file >actual &&
 	test_cmp expect actual
@@ -455,6 +478,66 @@ test_expect_success 'pull --no-autostash & merge.autostash unset' '
 	test_pull_autostash_fail --no-autostash --no-rebase
 '
 
+test_expect_success 'pull succeeds with dirty working directory and pull.autostash=true' '
+	test_config pull.autostash true &&
+	test_pull_autostash 1 --rebase &&
+	test_pull_autostash 2 --no-rebase &&
+	test_pull_autostash 1 --autostash --rebase &&
+	test_pull_autostash 2 --autostash --no-rebase
+'
+
+test_expect_success 'pull fails with dirty working directory and pull.autostash=false' '
+	test_config pull.autostash false &&
+	test_pull_autostash_fail --rebase &&
+	test_pull_autostash_fail --no-rebase &&
+	test_pull_autostash_fail --no-autostash --rebase &&
+	test_pull_autostash_fail --no-autostash --no-rebase
+'
+
+test_expect_success 'pull --autostash overrides pull.autostash=false' '
+	test_config pull.autostash false &&
+	test_pull_autostash 1 --autostash --rebase &&
+	test_pull_autostash 2 --autostash --no-rebase
+'
+
+test_expect_success 'pull --no-autostash overrides pull.autostash=true' '
+	test_config pull.autostash true &&
+	test_pull_autostash_fail --no-autostash --rebase &&
+	test_pull_autostash_fail --no-autostash --no-rebase
+'
+
+test_expect_success 'pull.autostash=true overrides rebase.autostash' '
+	test_config pull.autostash true &&
+	test_config rebase.autostash true &&
+	test_pull_autostash 1 --rebase &&
+	test_config rebase.autostash false &&
+	test_pull_autostash 1 --rebase
+'
+
+test_expect_success 'pull.autostash=false overrides rebase.autostash' '
+	test_config pull.autostash false &&
+	test_config rebase.autostash true &&
+	test_pull_autostash_fail --rebase &&
+	test_config rebase.autostash false &&
+	test_pull_autostash_fail --rebase
+'
+
+test_expect_success 'pull.autostash=true overrides merge.autostash' '
+	test_config pull.autostash true &&
+	test_config merge.autostash true &&
+	test_pull_autostash 2 --no-rebase &&
+	test_config merge.autostash false &&
+	test_pull_autostash 2 --no-rebase
+'
+
+test_expect_success 'pull.autostash=false overrides merge.autostash' '
+	test_config pull.autostash false &&
+	test_config merge.autostash true &&
+	test_pull_autostash_fail --no-rebase &&
+	test_config merge.autostash false &&
+	test_pull_autostash_fail --no-rebase
+'
+
 test_expect_success 'pull.rebase' '
 	git reset --hard before-rebase &&
 	test_config pull.rebase true &&
@@ -503,7 +586,7 @@ test_expect_success 'pull --rebase warns on --verify-signatures' '
 	echo new >expect &&
 	git show HEAD:file2 >actual &&
 	test_cmp expect actual &&
-	test_i18ngrep "ignoring --verify-signatures for rebase" err
+	test_grep "ignoring --verify-signatures for rebase" err
 '
 
 test_expect_success 'pull --rebase does not warn on --no-verify-signatures' '
@@ -513,7 +596,7 @@ test_expect_success 'pull --rebase does not warn on --no-verify-signatures' '
 	echo new >expect &&
 	git show HEAD:file2 >actual &&
 	test_cmp expect actual &&
-	test_i18ngrep ! "verify-signatures" err
+	test_grep ! "verify-signatures" err
 '
 
 # add a feature branch, keep-merge, that is merged into main, so the
@@ -723,7 +806,7 @@ test_expect_success 'pull --rebase fails on unborn branch with staged changes' '
 		test_cmp expect actual &&
 		git show :staged-file >actual &&
 		test_cmp expect actual &&
-		test_i18ngrep "unborn branch with changes added to the index" err
+		test_grep "unborn branch with changes added to the index" err
 	)
 '
 
@@ -796,7 +879,7 @@ test_expect_success 'git pull --rebase does not reapply old patches' '
 		cd dst &&
 		test_must_fail git pull --rebase &&
 		cat .git/rebase-merge/done .git/rebase-merge/git-rebase-todo >work &&
-		grep -v -e \# -e ^$ work >patches &&
+		grep -v -e ^\# -e ^$ work >patches &&
 		test_line_count = 1 patches &&
 		rm -f work
 	)
@@ -809,6 +892,33 @@ test_expect_success 'git pull --rebase against local branch' '
 	test_cmp expect file &&
 	echo file >expect &&
 	test_cmp expect file2
+'
+
+test_expect_success 'pull does not crash when a merge head does not resolve' '
+	test_when_finished "rm -rf up dn" &&
+	git init up &&
+	(
+		cd up &&
+		test_commit base &&
+		git switch -c sideA &&
+		test_commit a &&
+		git switch -c sideB base &&
+		test_commit b
+	) &&
+	git clone up dn &&
+	(
+		cd dn &&
+		git commit-graph write --reachable &&
+		oid=$(git rev-parse refs/remotes/origin/sideA) &&
+		obj=.git/objects/$(test_oid_to_path "$oid") &&
+
+		# Corrupt the object instead of removing it: a missing
+		# object that is still in the commit-graph is caught by
+		# fetch before pull ever reaches the fast-forward check.
+		rm -f "$obj" &&
+		echo garbage >"$obj" &&
+		test_must_fail git pull --no-rebase origin sideA sideB
+	)
 '
 
 test_done

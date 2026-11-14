@@ -2,7 +2,6 @@
 
 test_description=check-ignore
 
-TEST_PASSES_SANITIZE_LEAK=true
 TEST_CREATE_REPO_NO_TEMPLATE=1
 . ./test-lib.sh
 
@@ -40,16 +39,16 @@ test_stderr () {
 }
 
 broken_c_unquote () {
-	"$PERL_PATH" -pe 's/^"//; s/\\//; s/"$//; tr/\n/\0/' "$@"
+	sed -e 's/^"//' -e 's/\\//' -e 's/"$//' "$1" | tr '\n' '\0'
 }
 
 broken_c_unquote_verbose () {
-	"$PERL_PATH" -pe 's/	"/	/; s/\\//; s/"$//; tr/:\t\n/\0/' "$@"
+	sed -e 's/	"/	/' -e 's/\\//' -e 's/"$//' "$1" | tr ':\t\n' '\000'
 }
 
 stderr_contains () {
 	regexp="$1"
-	if test_i18ngrep "$regexp" "$HOME/stderr"
+	if test_grep "$regexp" "$HOME/stderr"
 	then
 		return 0
 	else
@@ -123,8 +122,8 @@ test_expect_success_multiple () {
 	fi
 	testname="$1" expect_all="$2" code="$3"
 
-	expect_verbose=$( echo "$expect_all" | grep -v '^::	' )
-	expect=$( echo "$expect_verbose" | sed -e 's/.*	//' )
+	expect_verbose=$(echo "$expect_all" | grep -v '^::	' || :)
+	expect=$(echo "$expect_verbose" | sed -e 's/.*	//')
 
 	test_expect_success $prereq "$testname${no_index_opt:+ with $no_index_opt}" '
 		expect "$expect" &&
@@ -791,8 +790,8 @@ test_expect_success 'existing file and directory' '
 	>one &&
 	mkdir top-level-dir &&
 	git check-ignore one top-level-dir >actual &&
-	grep one actual &&
-	grep top-level-dir actual
+	test_grep one actual &&
+	test_grep top-level-dir actual
 '
 
 test_expect_success 'existing directory and file' '
@@ -801,8 +800,8 @@ test_expect_success 'existing directory and file' '
 	>one &&
 	mkdir top-level-dir &&
 	git check-ignore top-level-dir one >actual &&
-	grep one actual &&
-	grep top-level-dir actual
+	test_grep one actual &&
+	test_grep top-level-dir actual
 '
 
 test_expect_success 'exact prefix matching (with root)' '
@@ -844,6 +843,17 @@ test_expect_success 'directories and ** matches' '
 	data/file
 	data/data1/file1
 	data/data2/file2
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success '** not confused by matching leading prefix' '
+	cat >.gitignore <<-\EOF &&
+	foo**/bar
+	EOF
+	git check-ignore foobar foo/bar >actual &&
+	cat >expect <<-\EOF &&
+	foo/bar
 	EOF
 	test_cmp expect actual
 '
@@ -936,13 +946,22 @@ test_expect_success SYMLINKS 'symlinks respected in info/exclude' '
 '
 
 test_expect_success SYMLINKS 'symlinks not respected in-tree' '
-	test_when_finished "rm .gitignore" &&
+	test_when_finished "rm -rf subdir .gitignore err actual" &&
 	ln -s ignore .gitignore &&
 	mkdir subdir &&
 	ln -s ignore subdir/.gitignore &&
 	test_must_fail git check-ignore subdir/file >actual 2>err &&
 	test_must_be_empty actual &&
-	test_i18ngrep "unable to access.*gitignore" err
+	test_grep "unable to access.*gitignore" err
+'
+
+test_expect_success EXPENSIVE 'large exclude file ignored in tree' '
+	test_when_finished "rm .gitignore" &&
+	find . -name .gitignore -exec rm "{}" ";" &&
+	dd if=/dev/zero of=.gitignore bs=101M count=1 &&
+	git ls-files -o --exclude-standard 2>err &&
+	echo "warning: ignoring excessively large pattern file: .gitignore" >expect &&
+	test_cmp expect err
 '
 
 test_done

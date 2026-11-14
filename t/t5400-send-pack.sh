@@ -55,6 +55,13 @@ test_expect_success setup '
 	echo Rebase &&
 	git log'
 
+test_expect_success 'send-pack does not crash with -h' '
+	git send-pack -h >usage &&
+	test_grep "[Uu]sage: git send-pack " usage &&
+	nongit git send-pack -h >usage &&
+	test_grep "[Uu]sage: git send-pack " usage
+'
+
 test_expect_success 'pack the source repository' '
 	git repack -a -d &&
 	git prune
@@ -180,6 +187,7 @@ test_expect_success 'receive-pack runs auto-gc in remote repo' '
 		cd child &&
 		git config gc.autopacklimit 1 &&
 		git config gc.autodetach false &&
+		git config maintenance.strategy gc &&
 		git branch test_auto_gc &&
 		# And create a file that follows the temporary object naming
 		# convention for the auto-gc to remove
@@ -268,7 +276,7 @@ extract_ref_advertisement () {
 	'
 }
 
-test_expect_success 'receive-pack de-dupes .have lines' '
+test_expect_success PERL_TEST_HELPERS 'receive-pack de-dupes .have lines' '
 	git init shared &&
 	git -C shared commit --allow-empty -m both &&
 	git clone -s shared fork &&

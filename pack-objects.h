@@ -1,13 +1,15 @@
 #ifndef PACK_OBJECTS_H
 #define PACK_OBJECTS_H
 
-#include "object-store.h"
+#include "odb.h"
 #include "thread-utils.h"
 #include "pack.h"
+#include "packfile.h"
 
 struct repository;
 
-#define DEFAULT_DELTA_CACHE_SIZE (256 * 1024 * 1024)
+#define DEFAULT_DELTA_CACHE_SIZE       (256 * 1024 * 1024)
+#define DEFAULT_DELTA_BASE_CACHE_LIMIT (96 * 1024 * 1024)
 
 #define OE_DFS_STATE_BITS	2
 #define OE_DEPTH_BITS		12
@@ -118,16 +120,28 @@ struct object_entry {
 	unsigned ext_base:1; /* delta_idx points outside packlist */
 };
 
+/**
+ * A packing region is a section of the packing_data.objects array
+ * as given by a starting index and a number of elements.
+ */
+struct packing_region {
+	size_t start;
+	size_t nr;
+};
+
 struct packing_data {
 	struct repository *repo;
 	struct object_entry *objects;
 	uint32_t nr_objects, nr_alloc;
 
+	struct packing_region *regions;
+	size_t nr_regions, nr_regions_alloc;
+
 	int32_t *index;
 	uint32_t index_size;
 
 	unsigned int *in_pack_pos;
-	unsigned long *delta_size;
+	size_t *delta_size;
 
 	/*
 	 * Only one of these can be non-NULL and they have different
@@ -169,6 +183,7 @@ struct packing_data {
 };
 
 void prepare_packing_data(struct repository *r, struct packing_data *pdata);
+void clear_packing_data(struct packing_data *pdata);
 
 /* Protect access to object database */
 static inline void packing_data_lock(struct packing_data *pdata)
@@ -204,6 +219,34 @@ static inline uint32_t pack_name_hash(const char *name)
 		hash = (hash >> 2) + (c << 24);
 	}
 	return hash;
+}
+
+static inline uint32_t pack_name_hash_v2(const unsigned char *name)
+{
+	uint32_t hash = 0, base = 0, c;
+
+	if (!name)
+		return 0;
+
+	while ((c = *name++)) {
+		if (isspace(c))
+			continue;
+		if (c == '/') {
+			base = (base >> 6) ^ hash;
+			hash = 0;
+		} else {
+			/*
+			 * 'c' is only a single byte. Reverse it and move
+			 * it to the top of the hash, moving the rest to
+			 * less-significant bits.
+			 */
+			c = (c & 0xF0) >> 4 | (c & 0x0F) << 4;
+			c = (c & 0xCC) >> 2 | (c & 0x33) << 2;
+			c = (c & 0xAA) >> 1 | (c & 0x55) << 1;
+			hash = (hash >> 2) + (c << 24);
+		}
+	}
+	return (base >> 6) ^ hash;
 }
 
 static inline enum object_type oe_type(const struct object_entry *e)

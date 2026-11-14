@@ -23,7 +23,7 @@ struct index_state;
 #define PATHSPEC_ONESTAR 1	/* the pathspec pattern satisfies GFNM_ONESTAR */
 
 /**
- * See glossary-context.txt for the syntax of pathspec.
+ * See glossary-content.txt for the syntax of pathspec.
  * In memory, a pathspec set is represented by "struct pathspec" and is
  * prepared by parse_pathspec().
  */
@@ -35,8 +35,8 @@ struct pathspec {
 	unsigned magic;
 	int max_depth;
 	struct pathspec_item {
-		char *match;
-		char *original;
+		const char *match;
+		const char *original;
 		unsigned magic;
 		int len, prefix;
 		int nowildcard_len;
@@ -76,6 +76,11 @@ struct pathspec {
  * allowed, then it will automatically set for every pathspec.
  */
 #define PATHSPEC_LITERAL_PATH (1<<6)
+/*
+ * For git diff --no-index, indicate that we are operating without
+ * a repository or index.
+ */
+#define PATHSPEC_NO_REPOSITORY (1<<7)
 
 /**
  * Given command line arguments and a prefix, convert the input to
@@ -130,6 +135,14 @@ void parse_pathspec_file(struct pathspec *pathspec,
 void copy_pathspec(struct pathspec *dst, const struct pathspec *src);
 void clear_pathspec(struct pathspec *);
 
+/*
+ * Add a human-readable string to "out" representing the PATHSPEC_* flags set
+ * in "magic". The result is suitable for error messages, but not for
+ * parsing as pathspec magic itself (you get 'icase' with quotes, not
+ * :(icase)).
+ */
+void pathspec_magic_names(unsigned magic, struct strbuf *out);
+
 static inline int ps_strncmp(const struct pathspec_item *item,
 			     const char *s1, const char *s2, size_t n)
 {
@@ -170,5 +183,28 @@ static inline int matches_skip_worktree(const struct pathspec *pathspec,
 int match_pathspec_attrs(struct index_state *istate,
 			 const char *name, int namelen,
 			 const struct pathspec_item *item);
+
+int match_pathspec(struct index_state *istate,
+		   const struct pathspec *pathspec,
+		   const char *name, int namelen,
+		   int prefix, char *seen, int is_dir);
+
+/* Set both DO_MATCH_DIRECTORY and DO_MATCH_LEADING_PATHSPEC if is_dir true */
+int match_leading_pathspec(struct index_state *istate,
+			   const struct pathspec *ps,
+			   const char *name, int namelen,
+			   int prefix, char *seen, int is_dir);
+
+/*
+ * Determine whether a pathspec will match only entire index entries (non-sparse
+ * files and/or entire sparse directories). If the pathspec has the potential to
+ * match partial contents of a sparse directory, return 1 to indicate the index
+ * should be expanded to match the  appropriate index entries.
+ *
+ * For the sake of simplicity, always return 1 if using a more complex "magic"
+ * pathspec.
+ */
+int pathspec_needs_expanded_index(struct index_state *istate,
+				  const struct pathspec *pathspec);
 
 #endif /* PATHSPEC_H */

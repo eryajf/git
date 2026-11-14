@@ -1,18 +1,28 @@
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "builtin.h"
 #include "exec-cmd.h"
+#include "gettext.h"
 #include "pkt-line.h"
 #include "parse-options.h"
 #include "protocol.h"
+#include "replace-object.h"
 #include "upload-pack.h"
 #include "serve.h"
+#include "setup.h"
+#include "commit.h"
+#include "environment.h"
 
 static const char * const upload_pack_usage[] = {
-	N_("git upload-pack [<options>] <dir>"),
+	N_("git-upload-pack [--[no-]strict] [--timeout=<n>] [--stateless-rpc]\n"
+	   "                [--advertise-refs] <directory>"),
 	NULL
 };
 
-int cmd_upload_pack(int argc, const char **argv, const char *prefix)
+int cmd_upload_pack(int argc,
+		    const char **argv,
+		    const char *prefix,
+		    struct repository *repo UNUSED)
 {
 	const char *dir;
 	int strict = 0;
@@ -31,9 +41,11 @@ int cmd_upload_pack(int argc, const char **argv, const char *prefix)
 			    N_("interrupt transfer after <n> seconds of inactivity")),
 		OPT_END()
 	};
+	unsigned enter_repo_flags = ENTER_REPO_ANY_OWNER_OK;
 
 	packet_trace_identity("upload-pack");
-	read_replace_refs = 0;
+	disable_replace_refs();
+	save_commit_buffer = 0;
 
 	argc = parse_options(argc, argv, prefix, options, upload_pack_usage, 0);
 
@@ -44,15 +56,35 @@ int cmd_upload_pack(int argc, const char **argv, const char *prefix)
 
 	dir = argv[0];
 
-	if (!enter_repo(dir, strict))
+	if (strict)
+		enter_repo_flags |= ENTER_REPO_STRICT;
+	if (!enter_repo(the_repository, dir, enter_repo_flags))
 		die("'%s' does not appear to be a git repository", dir);
+
+	/*
+	 * Lazily fetching while serving a client would run `git fetch`,
+	 * which may execute arbitrary commands from the configuration
+	 * and hooks of the served repo, so we disable it by default as
+	 * we trust nobody. There are two ways for a server operator to
+	 * allow it though:
+	 *
+	 *   - if GIT_NO_LAZY_FETCH is already set, we leave it alone and
+	 *     honor whatever the operator put there,
+	 *
+	 *   - otherwise, if the served repo is in the
+	 *     "uploadpack.lazyFetchTrusted" protected allowlist, we
+	 *     don't disable lazy fetching.
+	 */
+	if (!getenv(NO_LAZY_FETCH_ENVIRONMENT) &&
+	    !upload_pack_lazy_fetch_trusted(the_repository))
+		xsetenv(NO_LAZY_FETCH_ENVIRONMENT, "1", 1);
 
 	switch (determine_protocol_version_server()) {
 	case protocol_v2:
 		if (advertise_refs)
-			protocol_v2_advertise_capabilities();
+			protocol_v2_advertise_capabilities(the_repository);
 		else
-			protocol_v2_serve_loop(stateless_rpc);
+			protocol_v2_serve_loop(the_repository, stateless_rpc);
 		break;
 	case protocol_v1:
 		/*

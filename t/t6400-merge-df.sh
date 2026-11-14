@@ -84,12 +84,7 @@ test_expect_success 'modify/delete + directory/file conflict' '
 
 	test_stdout_line_count = 5 git ls-files -s &&
 	test_stdout_line_count = 4 git ls-files -u &&
-	if test "$GIT_TEST_MERGE_ALGORITHM" = ort
-	then
-		test_stdout_line_count = 0 git ls-files -o
-	else
-		test_stdout_line_count = 1 git ls-files -o
-	fi &&
+	test_stdout_line_count = 0 git ls-files -o &&
 
 	test_path_is_file letters/file &&
 	test_path_is_file letters.txt &&
@@ -105,12 +100,7 @@ test_expect_success 'modify/delete + directory/file conflict; other way' '
 
 	test_stdout_line_count = 5 git ls-files -s &&
 	test_stdout_line_count = 4 git ls-files -u &&
-	if test "$GIT_TEST_MERGE_ALGORITHM" = ort
-	then
-		test_stdout_line_count = 0 git ls-files -o
-	else
-		test_stdout_line_count = 1 git ls-files -o
-	fi &&
+	test_stdout_line_count = 0 git ls-files -o &&
 
 	test_path_is_file letters/file &&
 	test_path_is_file letters.txt &&
@@ -126,7 +116,7 @@ test_expect_success 'Simple merge in repo with interesting pathnames' '
 	#     foo/bar-2/baz
 	# The fact that foo/bar-2 appears between foo/bar and foo/bar/baz
 	# can trip up some codepaths, and is the point of this test.
-	test_create_repo name-ordering &&
+	git init name-ordering &&
 	(
 		cd name-ordering &&
 

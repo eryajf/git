@@ -239,4 +239,72 @@ check_zip with_untracked2
 check_added with_untracked2 untracked one/untracked
 check_added with_untracked2 untracked two/untracked
 
+test_expect_success 'git-archive --format=zip with bigFile delta chains' '
+	test_when_finished rm -rf repo &&
+	git init repo &&
+	(
+		cd repo &&
+		test-tool genrandom foo 100000 >base &&
+		{
+			cat base &&
+			echo "trailing data"
+		} >delta-1 &&
+		{
+			cat delta-1 &&
+			echo "trailing data"
+		} >delta-2 &&
+		git add . &&
+		git commit -m "blobs" &&
+		git repack -Ad &&
+		git verify-pack -v .git/objects/pack/pack-*.idx >stats &&
+		test_grep "chain length = 1: 1 object" stats &&
+		test_grep "chain length = 2: 1 object" stats &&
+
+		git -c core.bigFileThreshold=1k archive --format=zip HEAD >archive.zip &&
+		if test_have_prereq UNZIP
+		then
+			mkdir unpack &&
+			cd unpack &&
+			"$GIT_UNZIP" ../archive.zip &&
+			test_cmp base ../base &&
+			test_cmp delta-1 ../delta-1 &&
+			test_cmp delta-2 ../delta-2
+		fi
+	)
+'
+
+# Test remote archive over HTTP protocol.
+#
+# Note: this should be the last part of this test suite, because
+# by including lib-httpd.sh, the test may end early if httpd tests
+# should not be run.
+#
+. "$TEST_DIRECTORY"/lib-httpd.sh
+start_httpd
+
+test_expect_success "setup for HTTP protocol" '
+	cp -R bare.git "$HTTPD_DOCUMENT_ROOT_PATH/bare.git" &&
+	git -C "$HTTPD_DOCUMENT_ROOT_PATH/bare.git" \
+		config http.uploadpack true &&
+	set_askpass user@host pass@host
+'
+
+setup_askpass_helper
+
+test_expect_success 'remote archive does not work with protocol v1' '
+	test_must_fail git -c protocol.version=1 archive \
+		--remote="$HTTPD_URL/auth/smart/bare.git" \
+		--output=remote-http.zip HEAD >actual 2>&1 &&
+	cat >expect <<-EOF &&
+	fatal: can${SQ}t connect to subservice git-upload-archive
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'archive remote http repository' '
+	git archive --remote="$HTTPD_URL/auth/smart/bare.git" \
+		--output=remote-http.zip HEAD &&
+	test_cmp_bin d.zip remote-http.zip
+'
+
 test_done

@@ -18,6 +18,10 @@ test_invalid_grep_expression() {
 	'
 }
 
+test_lazy_prereq MB_REGEX '
+	LC_ALL=en_US.UTF-8 test-tool regex "^.$" "¿"
+'
+
 cat >hello.c <<EOF
 #include <assert.h>
 #include <stdio.h>
@@ -28,6 +32,7 @@ int main(int argc, const char **argv)
 	return 0;
 	/* char ?? */
 }
+
 EOF
 
 test_expect_success setup '
@@ -83,10 +88,15 @@ test_expect_success setup '
 	# Still a no-op.
 	function dummy() {}
 	EOF
+	printf "\200\nASCII\n" >invalid-utf8 &&
 	if test_have_prereq FUNNYNAMES
 	then
 		echo unusual >"\"unusual\" pathname" &&
 		echo unusual >"t/nested \"unusual\" pathname"
+	fi &&
+	if test_have_prereq MB_REGEX
+	then
+		echo "¿" >reverse-question-mark
 	fi &&
 	git add . &&
 	test_tick &&
@@ -313,11 +323,11 @@ do
 		${HC}file:1:5:mmap
 		${HC}file:2:5:mmap
 		${HC}file:3:5:mmap
-		${HC}file:3:13:mmap
+		${HC}file:3:14:mmap
 		${HC}file:4:5:mmap
-		${HC}file:4:13:mmap
+		${HC}file:4:14:mmap
 		${HC}file:5:5:mmap
-		${HC}file:5:13:mmap
+		${HC}file:5:14:mmap
 		EOF
 		git grep --column -n -o -e mmap $H >actual &&
 		test_cmp expected actual
@@ -526,6 +536,14 @@ do
 		test_cmp expected actual
 	'
 
+	test_expect_success "grep $L searches past invalid lines on UTF-8 locale" '
+		LC_ALL=en_US.UTF-8 git grep A. invalid-utf8 >actual &&
+		cat >expected <<-EOF &&
+		invalid-utf8:ASCII
+		EOF
+		test_cmp expected actual
+	'
+
 	test_expect_success FUNNYNAMES "grep $L should quote unusual pathnames" '
 		cat >expected <<-EOF &&
 		${HC}"\"unusual\" pathname":unusual
@@ -568,6 +586,14 @@ do
 		test_cmp expected actual-replace-null
 	'
 done
+
+test_expect_success MB_REGEX 'grep exactly one char in single-char multibyte file' '
+	LC_ALL=en_US.UTF-8 git grep "^.$" reverse-question-mark
+'
+
+test_expect_success MB_REGEX 'grep two chars in single-char multibyte file' '
+	LC_ALL=en_US.UTF-8 test_expect_code 1 git grep ".." reverse-question-mark
+'
 
 cat >expected <<EOF
 file
@@ -793,6 +819,19 @@ test_expect_success 'grep -f, ignore empty lines, read patterns from stdin' '
 	test_cmp expected actual
 '
 
+test_expect_success 'grep -f, use cwd relative file' '
+	test_when_finished "git rm -f sub/dir/file" &&
+	mkdir -p sub/dir &&
+	echo hit >sub/dir/file &&
+	git add sub/dir/file &&
+	echo hit >sub/dir/pattern &&
+	echo miss >pattern &&
+	(
+		cd sub/dir && git grep -f pattern file
+	) &&
+	git -C sub/dir grep -f pattern file
+'
+
 cat >expected <<EOF
 y:y yy
 --
@@ -986,7 +1025,9 @@ test_expect_success 'log --committer does not search in timestamp' '
 test_expect_success 'grep with CE_VALID file' '
 	git update-index --assume-unchanged t/t &&
 	rm t/t &&
-	test "$(git grep test)" = "t/t:test" &&
+	echo "t/t:test" >expect &&
+	git grep test >actual &&
+	test_cmp expect actual &&
 	git update-index --no-assume-unchanged t/t &&
 	git checkout t/t
 '
@@ -1060,19 +1101,19 @@ test_expect_success 'grep -W with userdiff' '
 '
 
 test_expect_success ' includes preceding comment' '
-	grep "# Say hello" function-context-userdiff-actual
+	test_grep "# Say hello" function-context-userdiff-actual
 '
 
 test_expect_success ' includes function line' '
-	grep "=function hello" function-context-userdiff-actual
+	test_grep "=function hello" function-context-userdiff-actual
 '
 
 test_expect_success ' includes matching line' '
-	grep ":  echo" function-context-userdiff-actual
+	test_grep ":  echo" function-context-userdiff-actual
 '
 
 test_expect_success ' includes last line of the function' '
-	grep "} # hello" function-context-userdiff-actual
+	test_grep "} # hello" function-context-userdiff-actual
 '
 
 for threads in $(test_seq 0 10)
@@ -1096,16 +1137,16 @@ test_expect_success !PTHREADS,!FAIL_PREREQS \
 	git grep --threads=2 Hello hello_world 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 1 warnings &&
-	grep -F "no threads support, ignoring --threads" err &&
+	test_grep -F "no threads support, ignoring --threads" err &&
 	git -c grep.threads=2 grep Hello hello_world 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 1 warnings &&
-	grep -F "no threads support, ignoring grep.threads" err &&
+	test_grep -F "no threads support, ignoring grep.threads" err &&
 	git -c grep.threads=2 grep --threads=4 Hello hello_world 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 2 warnings &&
-	grep -F "no threads support, ignoring --threads" err &&
-	grep -F "no threads support, ignoring grep.threads" err &&
+	test_grep -F "no threads support, ignoring --threads" err &&
+	test_grep -F "no threads support, ignoring grep.threads" err &&
 	git -c grep.threads=0 grep --threads=0 Hello hello_world 2>err &&
 	test_line_count = 0 err
 '
@@ -1214,6 +1255,33 @@ test_expect_success 'outside of git repository with fallbackToNoIndex' '
 		} >../expect.with.ignored &&
 		git -c grep.fallbackToNoIndex grep --no-exclude-standard o >../actual.full &&
 		test_cmp ../expect.with.ignored ../actual.full
+	)
+'
+
+test_expect_success 'no repository with path outside $cwd' '
+	test_when_finished rm -fr non &&
+	rm -fr non &&
+	mkdir -p non/git/sub non/tig &&
+	(
+		GIT_CEILING_DIRECTORIES="$(pwd)/non" &&
+		export GIT_CEILING_DIRECTORIES &&
+		cd non/git &&
+		test_expect_code 128 git grep --no-index search .. 2>error &&
+		test_grep "is outside the directory tree" error
+	) &&
+	(
+		GIT_CEILING_DIRECTORIES="$(pwd)/non" &&
+		export GIT_CEILING_DIRECTORIES &&
+		cd non/git &&
+		test_expect_code 128 git grep --no-index search ../tig 2>error &&
+		test_grep "is outside the directory tree" error
+	) &&
+	(
+		GIT_CEILING_DIRECTORIES="$(pwd)/non" &&
+		export GIT_CEILING_DIRECTORIES &&
+		cd non/git &&
+		test_expect_code 128 git grep --no-index search ../non 2>error &&
+		test_grep "no such path in the working tree" error
 	)
 '
 
@@ -1369,7 +1437,7 @@ test_expect_success 'grep --no-index pattern -- path' '
 
 test_expect_success 'grep --no-index complains of revs' '
 	test_must_fail git grep --no-index o main -- 2>err &&
-	test_i18ngrep "cannot be used with revs" err
+	test_grep "cannot be used with revs" err
 '
 
 test_expect_success 'grep --no-index prefers paths to revs' '
@@ -1382,7 +1450,7 @@ test_expect_success 'grep --no-index prefers paths to revs' '
 
 test_expect_success 'grep --no-index does not "diagnose" revs' '
 	test_must_fail git grep --no-index o :1:hello.c 2>err &&
-	test_i18ngrep ! -i "did you mean" err
+	test_grep ! -i "did you mean" err
 '
 
 cat >expected <<EOF
@@ -1860,6 +1928,64 @@ test_expect_success 'grep does not report i-t-a and assume unchanged with -L' '
 	git ls-files | grep -v "^intend-to-add-assume-unchanged\$" >expected &&
 	git grep -L "nonexistent_string" >actual &&
 	test_cmp expected actual
+'
+
+test_expect_success 'grep of revision in partial clone batches prefetch and honors pathspec' '
+	test_when_finished "rm -rf grep-partial-src grep-partial" &&
+
+	git init grep-partial-src &&
+	(
+		cd grep-partial-src &&
+		git config uploadpack.allowfilter 1 &&
+		git config uploadpack.allowanysha1inwant 1 &&
+		mkdir a b &&
+		echo "needle in haystack" >a/matches.txt &&
+		echo "nothing to see here" >a/nomatch.txt &&
+		echo "needle again" >b/matches.md &&
+		git add . &&
+		git commit -m "initial"
+	) &&
+
+	git clone --no-checkout --filter=blob:none \
+		"file://$(pwd)/grep-partial-src" grep-partial &&
+
+	# All three blobs are missing immediately after a blobless clone.
+	git -C grep-partial rev-list --quiet --objects \
+		--missing=print HEAD >missing &&
+	test_line_count = 3 missing &&
+
+	# A pathspec-limited grep should prefetch only the two blobs
+	# in a/.  It should fetch both blobs in one batched request.
+	GIT_TRACE2_EVENT="$(pwd)/grep-trace-pathspec" \
+		git -C grep-partial grep -c "needle" HEAD -- "a/*.txt" >result &&
+
+	# Only a/matches.txt contains "needle" among the matched paths.
+	test_line_count = 1 result &&
+
+	# Exactly the two a/*.txt blobs should have been requested, and
+	# the server packed those two objects in the response.
+	test_trace2_data promisor fetch_count 2 <grep-trace-pathspec &&
+	test_trace2_data pack-objects written 2 <grep-trace-pathspec &&
+
+	# b/matches.md should still be missing locally.
+	git -C grep-partial rev-list --quiet --objects \
+		--missing=print HEAD >missing &&
+	test_line_count = 1 missing &&
+
+	# A second grep without a pathspec must recurse into both
+	# subdirectories, but should request only the still-missing blob
+	# from the promisor.
+	GIT_TRACE2_EVENT="$(pwd)/grep-trace-all" \
+		git -C grep-partial grep -c "needle" HEAD >result &&
+
+	test_line_count = 2 result &&
+	test_trace2_data promisor fetch_count 1 <grep-trace-all &&
+	test_trace2_data pack-objects written 1 <grep-trace-all &&
+
+	# Everything is local now.
+	git -C grep-partial rev-list --quiet --objects \
+		--missing=print HEAD >missing &&
+	test_line_count = 0 missing
 '
 
 test_done

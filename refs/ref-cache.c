@@ -1,5 +1,7 @@
-#include "../cache.h"
+#include "../git-compat-util.h"
+#include "../hash.h"
 #include "../refs.h"
+#include "../repository.h"
 #include "refs-internal.h"
 #include "ref-cache.h"
 #include "../iterator.h"
@@ -32,6 +34,7 @@ struct ref_dir *get_ref_dir(struct ref_entry *entry)
 }
 
 struct ref_entry *create_ref_entry(const char *refname,
+				   const char *referent,
 				   const struct object_id *oid, int flag)
 {
 	struct ref_entry *ref;
@@ -39,6 +42,8 @@ struct ref_entry *create_ref_entry(const char *refname,
 	FLEX_ALLOC_STR(ref, name, refname);
 	oidcpy(&ref->u.value.oid, oid);
 	ref->flag = flag;
+	ref->u.value.referent = xstrdup_or_null(referent);
+
 	return ref;
 }
 
@@ -63,12 +68,16 @@ static void free_ref_entry(struct ref_entry *entry)
 		 * trigger the reading of loose refs.
 		 */
 		clear_ref_dir(&entry->u.subdir);
+	} else {
+		free(entry->u.value.referent);
 	}
 	free(entry);
 }
 
 void free_ref_cache(struct ref_cache *cache)
 {
+	if (!cache)
+		return;
 	free_ref_entry(cache->root);
 	free(cache);
 }
@@ -183,20 +192,6 @@ static struct ref_dir *find_containing_dir(struct ref_dir *dir,
 	}
 
 	return dir;
-}
-
-struct ref_entry *find_ref_entry(struct ref_dir *dir, const char *refname)
-{
-	int entry_index;
-	struct ref_entry *entry;
-	dir = find_containing_dir(dir, refname);
-	if (!dir)
-		return NULL;
-	entry_index = search_ref_dir(dir, refname, strlen(refname));
-	if (entry_index == -1)
-		return NULL;
-	entry = dir->entries[entry_index];
-	return (entry->flag & REF_DIR) ? NULL : entry;
 }
 
 /*
@@ -353,9 +348,7 @@ struct cache_ref_iterator {
 	struct ref_iterator base;
 
 	/*
-	 * The number of levels currently on the stack. This is always
-	 * at least 1, because when it becomes zero the iteration is
-	 * ended and this struct is freed.
+	 * The number of levels currently on the stack.
 	 */
 	size_t levels_nr;
 
@@ -367,7 +360,7 @@ struct cache_ref_iterator {
 	 * The prefix is matched textually, without regard for path
 	 * component boundaries.
 	 */
-	const char *prefix;
+	char *prefix;
 
 	/*
 	 * A stack of levels. levels[0] is the uppermost level that is
@@ -380,12 +373,18 @@ struct cache_ref_iterator {
 	struct cache_ref_iterator_level *levels;
 
 	struct repository *repo;
+	struct ref_cache *cache;
+
+	int prime_dir;
 };
 
 static int cache_ref_iterator_advance(struct ref_iterator *ref_iterator)
 {
 	struct cache_ref_iterator *iter =
 		(struct cache_ref_iterator *)ref_iterator;
+
+	if (!iter->levels_nr)
+		return ITER_DONE;
 
 	while (1) {
 		struct cache_ref_iterator_level *level =
@@ -400,7 +399,7 @@ static int cache_ref_iterator_advance(struct ref_iterator *ref_iterator)
 		if (++level->index == level->dir->nr) {
 			/* This level is exhausted; pop up a level */
 			if (--iter->levels_nr == 0)
-				return ref_iterator_abort(ref_iterator);
+				return ITER_DONE;
 
 			continue;
 		}
@@ -409,7 +408,8 @@ static int cache_ref_iterator_advance(struct ref_iterator *ref_iterator)
 
 		if (level->prefix_state == PREFIX_WITHIN_DIR) {
 			entry_prefix_state = overlaps_prefix(entry->name, iter->prefix);
-			if (entry_prefix_state == PREFIX_EXCLUDES_DIR)
+			if (entry_prefix_state == PREFIX_EXCLUDES_DIR ||
+			    (entry_prefix_state == PREFIX_WITHIN_DIR && !(entry->flag & REF_DIR)))
 				continue;
 		} else {
 			entry_prefix_state = level->prefix_state;
@@ -425,40 +425,139 @@ static int cache_ref_iterator_advance(struct ref_iterator *ref_iterator)
 			level->prefix_state = entry_prefix_state;
 			level->index = -1;
 		} else {
-			iter->base.refname = entry->name;
-			iter->base.oid = &entry->u.value.oid;
-			iter->base.flags = entry->flag;
+			memset(&iter->base.ref, 0, sizeof(iter->base.ref));
+			iter->base.ref.name = entry->name;
+			iter->base.ref.target = entry->u.value.referent;
+			iter->base.ref.oid = &entry->u.value.oid;
+			iter->base.ref.flags = entry->flag;
 			return ITER_OK;
 		}
 	}
 }
 
-static int cache_ref_iterator_peel(struct ref_iterator *ref_iterator,
-				   struct object_id *peeled)
+static int cache_ref_iterator_set_prefix(struct cache_ref_iterator *iter,
+					 const char *prefix)
 {
-	struct cache_ref_iterator *iter =
-		(struct cache_ref_iterator *)ref_iterator;
+	struct cache_ref_iterator_level *level;
+	struct ref_dir *dir;
 
-	if (iter->repo != the_repository)
-		BUG("peeling for non-the_repository is not supported");
-	return peel_object(ref_iterator->oid, peeled) ? -1 : 0;
+	dir = get_ref_dir(iter->cache->root);
+	if (prefix && *prefix)
+		dir = find_containing_dir(dir, prefix);
+	if (!dir) {
+		iter->levels_nr = 0;
+		return 0;
+	}
+
+	if (iter->prime_dir)
+		prime_ref_dir(dir, prefix);
+	iter->levels_nr = 1;
+	level = &iter->levels[0];
+	level->index = -1;
+	level->dir = dir;
+
+	if (prefix && *prefix) {
+		free(iter->prefix);
+		iter->prefix = xstrdup(prefix);
+		level->prefix_state = PREFIX_WITHIN_DIR;
+	} else {
+		FREE_AND_NULL(iter->prefix);
+		level->prefix_state = PREFIX_CONTAINS_DIR;
+	}
+
+	return 0;
 }
 
-static int cache_ref_iterator_abort(struct ref_iterator *ref_iterator)
+static int cache_ref_iterator_seek(struct ref_iterator *ref_iterator,
+				   const char *refname, unsigned int flags)
 {
 	struct cache_ref_iterator *iter =
 		(struct cache_ref_iterator *)ref_iterator;
 
-	free((char *)iter->prefix);
+	if (flags & REF_ITERATOR_SEEK_SET_PREFIX) {
+		return cache_ref_iterator_set_prefix(iter, refname);
+	} else if (refname && *refname) {
+		struct cache_ref_iterator_level *level;
+		const char *slash = refname;
+		struct ref_dir *dir;
+
+		dir = get_ref_dir(iter->cache->root);
+
+		if (iter->prime_dir)
+			prime_ref_dir(dir, refname);
+
+		iter->levels_nr = 1;
+		level = &iter->levels[0];
+		level->index = -1;
+		level->dir = dir;
+
+		/* Unset any previously set prefix */
+		FREE_AND_NULL(iter->prefix);
+
+		/*
+		 * Breakdown the provided seek path and assign the correct
+		 * indexing to each level as needed.
+		 */
+		do {
+			int idx;
+			size_t len;
+			int cmp = 0;
+
+			sort_ref_dir(dir);
+
+			slash = strchr(slash, '/');
+			len = slash ? (size_t)(slash - refname) : strlen(refname);
+
+			for (idx = 0; idx < dir->nr; idx++) {
+				cmp = strncmp(refname, dir->entries[idx]->name, len);
+				if (cmp <= 0)
+					break;
+			}
+			/* don't overflow the index */
+			idx = idx >= dir->nr ? dir->nr - 1 : idx;
+
+			if (slash)
+				slash = slash + 1;
+
+			level->index = idx;
+			if (dir->entries[idx]->flag & REF_DIR) {
+				/* push down a level */
+				dir = get_ref_dir(dir->entries[idx]);
+
+				ALLOC_GROW(iter->levels, iter->levels_nr + 1,
+					   iter->levels_alloc);
+				level = &iter->levels[iter->levels_nr++];
+				level->dir = dir;
+				level->index = -1;
+				level->prefix_state = PREFIX_CONTAINS_DIR;
+			} else {
+				/* reduce the index so the leaf node is iterated over */
+				if (cmp <= 0 && !slash)
+					level->index = idx - 1;
+				/*
+				 * while the seek path may not be exhausted, our
+				 * match is exhausted at a leaf node.
+				 */
+				break;
+			}
+		} while (slash && dir->nr);
+	}
+
+	return 0;
+}
+
+static void cache_ref_iterator_release(struct ref_iterator *ref_iterator)
+{
+	struct cache_ref_iterator *iter =
+		(struct cache_ref_iterator *)ref_iterator;
+	free(iter->prefix);
 	free(iter->levels);
-	base_ref_iterator_free(ref_iterator);
-	return ITER_DONE;
 }
 
 static struct ref_iterator_vtable cache_ref_iterator_vtable = {
 	.advance = cache_ref_iterator_advance,
-	.peel = cache_ref_iterator_peel,
-	.abort = cache_ref_iterator_abort
+	.seek = cache_ref_iterator_seek,
+	.release = cache_ref_iterator_release,
 };
 
 struct ref_iterator *cache_ref_iterator_begin(struct ref_cache *cache,
@@ -466,39 +565,23 @@ struct ref_iterator *cache_ref_iterator_begin(struct ref_cache *cache,
 					      struct repository *repo,
 					      int prime_dir)
 {
-	struct ref_dir *dir;
 	struct cache_ref_iterator *iter;
 	struct ref_iterator *ref_iterator;
-	struct cache_ref_iterator_level *level;
-
-	dir = get_ref_dir(cache->root);
-	if (prefix && *prefix)
-		dir = find_containing_dir(dir, prefix);
-	if (!dir)
-		/* There's nothing to iterate over. */
-		return empty_ref_iterator_begin();
-
-	if (prime_dir)
-		prime_ref_dir(dir, prefix);
 
 	CALLOC_ARRAY(iter, 1);
 	ref_iterator = &iter->base;
-	base_ref_iterator_init(ref_iterator, &cache_ref_iterator_vtable, 1);
+	base_ref_iterator_init(ref_iterator, &cache_ref_iterator_vtable);
 	ALLOC_GROW(iter->levels, 10, iter->levels_alloc);
 
-	iter->levels_nr = 1;
-	level = &iter->levels[0];
-	level->index = -1;
-	level->dir = dir;
-
-	if (prefix && *prefix) {
-		iter->prefix = xstrdup(prefix);
-		level->prefix_state = PREFIX_WITHIN_DIR;
-	} else {
-		level->prefix_state = PREFIX_CONTAINS_DIR;
-	}
-
 	iter->repo = repo;
+	iter->cache = cache;
+	iter->prime_dir = prime_dir;
+
+	if (cache_ref_iterator_seek(&iter->base, prefix,
+				    REF_ITERATOR_SEEK_SET_PREFIX) < 0) {
+		ref_iterator_free(&iter->base);
+		return NULL;
+	}
 
 	return ref_iterator;
 }

@@ -24,8 +24,9 @@ parse_verify_pack_blob_oid () {
 }
 
 test_expect_success 'verify blob count in normal packfile' '
-	git -C r1 ls-files -s file.1 file.2 file.3 file.4 file.5 |
-	test_parse_ls_files_stage_oids |
+	git -C r1 ls-files -s file.1 file.2 file.3 file.4 file.5 \
+		>ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r1 pack-objects --revs --stdout >all.pack <<-EOF &&
@@ -48,7 +49,15 @@ test_expect_success 'verify blob:none packfile has no blobs' '
 	git -C r1 index-pack ../filter.pack &&
 
 	git -C r1 verify-pack -v ../filter.pack >verify_result &&
-	! grep blob verify_result
+	test_grep ! blob verify_result
+'
+
+test_expect_success 'verify blob:none packfile without --stdout' '
+	git -C r1 pack-objects --revs --filter=blob:none mypackname >packhash <<-EOF &&
+	HEAD
+	EOF
+	git -C r1 verify-pack -v "mypackname-$(cat packhash).pack" >verify_result &&
+	test_grep ! blob verify_result
 '
 
 test_expect_success 'verify normal and blob:none packfiles have same commits/trees' '
@@ -76,7 +85,7 @@ test_expect_success 'get an error for missing tree object' '
 	test_must_fail git -C r5 pack-objects --revs --stdout 2>bad_tree <<-EOF &&
 	HEAD
 	EOF
-	grep "bad tree object" bad_tree
+	test_grep "bad tree object" bad_tree
 '
 
 test_expect_success 'setup for tests of tree:0' '
@@ -92,7 +101,7 @@ test_expect_success 'verify tree:0 packfile has no blobs or trees' '
 	EOF
 	git -C r1 index-pack ../commitsonly.pack &&
 	git -C r1 verify-pack -v ../commitsonly.pack >objs &&
-	! grep -E "tree|blob" objs
+	test_grep ! -E "tree|blob" objs
 '
 
 test_expect_success 'grab tree directly when using tree:0' '
@@ -123,8 +132,8 @@ test_expect_success 'setup r2' '
 '
 
 test_expect_success 'verify blob count in normal packfile' '
-	git -C r2 ls-files -s large.1000 large.10000 |
-	test_parse_ls_files_stage_oids |
+	git -C r2 ls-files -s large.1000 large.10000 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r2 pack-objects --revs --stdout >all.pack <<-EOF &&
@@ -147,7 +156,7 @@ test_expect_success 'verify blob:limit=500 omits all blobs' '
 	git -C r2 index-pack ../filter.pack &&
 
 	git -C r2 verify-pack -v ../filter.pack >verify_result &&
-	! grep blob verify_result
+	test_grep ! blob verify_result
 '
 
 test_expect_success 'verify blob:limit=1000' '
@@ -157,12 +166,12 @@ test_expect_success 'verify blob:limit=1000' '
 	git -C r2 index-pack ../filter.pack &&
 
 	git -C r2 verify-pack -v ../filter.pack >verify_result &&
-	! grep blob verify_result
+	test_grep ! blob verify_result
 '
 
 test_expect_success 'verify blob:limit=1001' '
-	git -C r2 ls-files -s large.1000 |
-	test_parse_ls_files_stage_oids |
+	git -C r2 ls-files -s large.1000 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r2 pack-objects --revs --stdout --filter=blob:limit=1001 >filter.pack <<-EOF &&
@@ -179,8 +188,8 @@ test_expect_success 'verify blob:limit=1001' '
 '
 
 test_expect_success 'verify blob:limit=10001' '
-	git -C r2 ls-files -s large.1000 large.10000 |
-	test_parse_ls_files_stage_oids |
+	git -C r2 ls-files -s large.1000 large.10000 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r2 pack-objects --revs --stdout --filter=blob:limit=10001 >filter.pack <<-EOF &&
@@ -197,8 +206,8 @@ test_expect_success 'verify blob:limit=10001' '
 '
 
 test_expect_success 'verify blob:limit=1k' '
-	git -C r2 ls-files -s large.1000 |
-	test_parse_ls_files_stage_oids |
+	git -C r2 ls-files -s large.1000 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r2 pack-objects --revs --stdout --filter=blob:limit=1k >filter.pack <<-EOF &&
@@ -215,8 +224,8 @@ test_expect_success 'verify blob:limit=1k' '
 '
 
 test_expect_success 'verify explicitly specifying oversized blob in input' '
-	git -C r2 ls-files -s large.1000 large.10000 |
-	test_parse_ls_files_stage_oids |
+	git -C r2 ls-files -s large.1000 large.10000 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	echo HEAD >objects &&
@@ -233,8 +242,8 @@ test_expect_success 'verify explicitly specifying oversized blob in input' '
 '
 
 test_expect_success 'verify blob:limit=1m' '
-	git -C r2 ls-files -s large.1000 large.10000 |
-	test_parse_ls_files_stage_oids |
+	git -C r2 ls-files -s large.1000 large.10000 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r2 pack-objects --revs --stdout --filter=blob:limit=1m >filter.pack <<-EOF &&
@@ -258,6 +267,44 @@ test_expect_success 'verify normal and blob:limit packfiles have same commits/tr
 
 	git -C r2 verify-pack -v ../filter.pack >verify_result &&
 	grep -E "commit|tree" verify_result |
+	parse_verify_pack_blob_oid |
+	sort >observed &&
+
+	test_cmp expected observed
+'
+
+test_expect_success 'verify small limit and big limit results in small limit' '
+	git -C r2 ls-files -s large.1000 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
+	sort >expected &&
+
+	git -C r2 pack-objects --revs --stdout --filter=blob:limit=1001 \
+		--filter=blob:limit=10001 >filter.pack <<-EOF &&
+	HEAD
+	EOF
+	git -C r2 index-pack ../filter.pack &&
+
+	git -C r2 verify-pack -v ../filter.pack >verify_result &&
+	grep blob verify_result |
+	parse_verify_pack_blob_oid |
+	sort >observed &&
+
+	test_cmp expected observed
+'
+
+test_expect_success 'verify big limit and small limit results in small limit' '
+	git -C r2 ls-files -s large.1000 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
+	sort >expected &&
+
+	git -C r2 pack-objects --revs --stdout --filter=blob:limit=10001 \
+		--filter=blob:limit=1001 >filter.pack <<-EOF &&
+	HEAD
+	EOF
+	git -C r2 index-pack ../filter.pack &&
+
+	git -C r2 verify-pack -v ../filter.pack >verify_result &&
+	grep blob verify_result |
 	parse_verify_pack_blob_oid |
 	sort >observed &&
 
@@ -289,8 +336,9 @@ test_expect_success 'setup r3' '
 '
 
 test_expect_success 'verify blob count in normal packfile' '
-	git -C r3 ls-files -s sparse1 sparse2 dir1/sparse1 dir1/sparse2 |
-	test_parse_ls_files_stage_oids |
+	git -C r3 ls-files -s sparse1 sparse2 dir1/sparse1 dir1/sparse2 \
+		>ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r3 pack-objects --revs --stdout >all.pack <<-EOF &&
@@ -341,8 +389,9 @@ test_expect_success 'setup r4' '
 '
 
 test_expect_success 'verify blob count in normal packfile' '
-	git -C r4 ls-files -s pattern sparse1 sparse2 dir1/sparse1 dir1/sparse2 |
-	test_parse_ls_files_stage_oids |
+	git -C r4 ls-files -s pattern sparse1 sparse2 dir1/sparse1 dir1/sparse2 \
+		>ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r4 pack-objects --revs --stdout >all.pack <<-EOF &&
@@ -359,8 +408,8 @@ test_expect_success 'verify blob count in normal packfile' '
 '
 
 test_expect_success 'verify sparse:oid=OID' '
-	git -C r4 ls-files -s dir1/sparse1 dir1/sparse2 |
-	test_parse_ls_files_stage_oids |
+	git -C r4 ls-files -s dir1/sparse1 dir1/sparse2 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r4 ls-files -s pattern >staged &&
@@ -379,8 +428,8 @@ test_expect_success 'verify sparse:oid=OID' '
 '
 
 test_expect_success 'verify sparse:oid=oid-ish' '
-	git -C r4 ls-files -s dir1/sparse1 dir1/sparse2 |
-	test_parse_ls_files_stage_oids |
+	git -C r4 ls-files -s dir1/sparse1 dir1/sparse2 >ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
 	git -C r4 pack-objects --revs --stdout --filter=sparse:oid=main:pattern >filter.pack <<-EOF &&
@@ -400,11 +449,12 @@ test_expect_success 'verify sparse:oid=oid-ish' '
 # This models previously omitted objects that we did not receive.
 
 test_expect_success 'setup r1 - delete loose blobs' '
-	git -C r1 ls-files -s file.1 file.2 file.3 file.4 file.5 |
-	test_parse_ls_files_stage_oids |
+	git -C r1 ls-files -s file.1 file.2 file.3 file.4 file.5 \
+		>ls_files_result &&
+	test_parse_ls_files_stage_oids <ls_files_result |
 	sort >expected &&
 
-	for id in `cat expected | sed "s|..|&/|"`
+	for id in `sed "s|..|&/|" expected`
 	do
 		rm r1/.git/objects/$id || return 1
 	done
@@ -426,6 +476,131 @@ test_expect_success 'verify pack-objects w/ --missing=allow-any' '
 	git -C r1 pack-objects --revs --stdout --missing=allow-any >miss.pack <<-EOF
 	HEAD
 	EOF
+'
+
+# Test that --path-walk produces the same object set as standard traversal
+# when using sparse:oid filters with cone-mode patterns.
+#
+# The sparse:oid filter restricts only blobs, not trees. Both standard
+# and path-walk should produce identical sets of blobs, commits, and trees.
+
+test_expect_success 'setup pw_sparse for path-walk comparison' '
+	git init pw_sparse &&
+	mkdir -p pw_sparse/inc/sub pw_sparse/exc/sub &&
+
+	for n in 1 2
+	do
+		echo "inc $n" >pw_sparse/inc/file$n &&
+		echo "inc sub $n" >pw_sparse/inc/sub/file$n &&
+		echo "exc $n" >pw_sparse/exc/file$n &&
+		echo "exc sub $n" >pw_sparse/exc/sub/file$n &&
+		echo "root $n" >pw_sparse/root$n || return 1
+	done &&
+
+	git -C pw_sparse add . &&
+	git -C pw_sparse commit -m "first" &&
+
+	echo "inc 1 modified" >pw_sparse/inc/file1 &&
+	echo "exc 1 modified" >pw_sparse/exc/file1 &&
+	echo "root 1 modified" >pw_sparse/root1 &&
+	git -C pw_sparse add . &&
+	git -C pw_sparse commit -m "second" &&
+
+	# Cone-mode sparse pattern: include root + inc/
+	printf "/*\n!/*/\n/inc/\n" |
+	git -C pw_sparse hash-object -w --stdin >sparse_oid
+'
+
+test_expect_success 'sparse:oid with --path-walk produces same blobs' '
+	oid=$(cat sparse_oid) &&
+
+	git -C pw_sparse pack-objects --revs --stdout \
+		--filter=sparse:oid=$oid >standard.pack <<-EOF &&
+	HEAD
+	EOF
+	git -C pw_sparse index-pack ../standard.pack &&
+	git -C pw_sparse verify-pack -v ../standard.pack >standard_verify &&
+
+	git -C pw_sparse pack-objects --revs --stdout \
+		--path-walk --filter=sparse:oid=$oid >pathwalk.pack <<-EOF &&
+	HEAD
+	EOF
+	git -C pw_sparse index-pack ../pathwalk.pack &&
+	git -C pw_sparse verify-pack -v ../pathwalk.pack >pathwalk_verify &&
+
+	# Blobs must match exactly
+	grep -E "^[0-9a-f]{40} blob" standard_verify |
+	awk "{print \$1}" | sort >standard_blobs &&
+	grep -E "^[0-9a-f]{40} blob" pathwalk_verify |
+	awk "{print \$1}" | sort >pathwalk_blobs &&
+	test_cmp standard_blobs pathwalk_blobs &&
+
+	# Commits must match exactly
+	grep -E "^[0-9a-f]{40} commit" standard_verify |
+	awk "{print \$1}" | sort >standard_commits &&
+	grep -E "^[0-9a-f]{40} commit" pathwalk_verify |
+	awk "{print \$1}" | sort >pathwalk_commits &&
+	test_cmp standard_commits pathwalk_commits
+'
+
+test_expect_success 'sparse:oid with --path-walk includes all trees' '
+	# The sparse:oid filter restricts only blobs, not trees.
+	# Both standard and path-walk should include the same trees.
+	grep -E "^[0-9a-f]{40} tree" standard_verify |
+	awk "{print \$1}" | sort >standard_trees &&
+	grep -E "^[0-9a-f]{40} tree" pathwalk_verify |
+	awk "{print \$1}" | sort >pathwalk_trees &&
+
+	test_cmp standard_trees pathwalk_trees
+'
+
+# Test the edge case where the same tree/blob OID appears at both an
+# in-cone and out-of-cone path. When sibling directories have identical
+# contents, they share a tree OID. The path-walk defers marking objects
+# SEEN until after checking sparse patterns, so an object at an out-of-cone
+# path can still be discovered at an in-cone path.
+
+test_expect_success 'setup pw_shared for shared OID across cone boundary' '
+	git init pw_shared &&
+	mkdir pw_shared/aaa pw_shared/zzz &&
+	echo "shared content" >pw_shared/aaa/file &&
+	echo "shared content" >pw_shared/zzz/file &&
+	echo "root file" >pw_shared/rootfile &&
+	git -C pw_shared add . &&
+	git -C pw_shared commit -m "aaa and zzz share tree OID" &&
+
+	# Verify they share a tree OID
+	aaa_tree=$(git -C pw_shared rev-parse HEAD:aaa) &&
+	zzz_tree=$(git -C pw_shared rev-parse HEAD:zzz) &&
+	test "$aaa_tree" = "$zzz_tree" &&
+
+	# Cone pattern: include root + zzz/ (not aaa/)
+	printf "/*\n!/*/\n/zzz/\n" |
+	git -C pw_shared hash-object -w --stdin >shared_sparse_oid
+'
+
+test_expect_success 'shared tree OID: --path-walk blobs match standard' '
+	oid=$(cat shared_sparse_oid) &&
+
+	git -C pw_shared pack-objects --revs --stdout \
+		--filter=sparse:oid=$oid >shared_std.pack <<-EOF &&
+	HEAD
+	EOF
+	git -C pw_shared index-pack ../shared_std.pack &&
+	git -C pw_shared verify-pack -v ../shared_std.pack >shared_std_verify &&
+
+	git -C pw_shared pack-objects --revs --stdout \
+		--path-walk --filter=sparse:oid=$oid >shared_pw.pack <<-EOF &&
+	HEAD
+	EOF
+	git -C pw_shared index-pack ../shared_pw.pack &&
+	git -C pw_shared verify-pack -v ../shared_pw.pack >shared_pw_verify &&
+
+	grep -E "^[0-9a-f]{40} blob" shared_std_verify |
+	awk "{print \$1}" | sort >shared_std_blobs &&
+	grep -E "^[0-9a-f]{40} blob" shared_pw_verify |
+	awk "{print \$1}" | sort >shared_pw_blobs &&
+	test_cmp shared_std_blobs shared_pw_blobs
 '
 
 test_done

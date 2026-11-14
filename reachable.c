@@ -1,6 +1,9 @@
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
+
+#include "git-compat-util.h"
+#include "gettext.h"
+#include "hex.h"
 #include "refs.h"
-#include "tag.h"
 #include "commit.h"
 #include "blob.h"
 #include "diff.h"
@@ -11,9 +14,12 @@
 #include "list-objects.h"
 #include "packfile.h"
 #include "worktree.h"
-#include "object-store.h"
+#include "object-file.h"
 #include "pack-bitmap.h"
 #include "pack-mtimes.h"
+#include "config.h"
+#include "run-command.h"
+#include "sequencer.h"
 
 struct connectivity_progress {
 	struct progress *progress;
@@ -27,18 +33,67 @@ static void update_progress(struct connectivity_progress *cp)
 		display_progress(cp->progress, cp->count);
 }
 
-static int add_one_ref(const char *path, const struct object_id *oid,
-		       int flag, void *cb_data)
+static void add_one_file(const char *path, struct rev_info *revs)
+{
+	struct strbuf buf = STRBUF_INIT;
+	struct object_id oid;
+	struct object *object;
+
+	if (!read_oneliner(&buf, path, READ_ONELINER_SKIP_IF_EMPTY)) {
+		strbuf_release(&buf);
+		return;
+	}
+	strbuf_trim(&buf);
+	if (!get_oid_hex(buf.buf, &oid)) {
+		object = parse_object_or_die(the_repository, &oid, buf.buf);
+		add_pending_object(revs, object, "");
+	}
+	strbuf_release(&buf);
+}
+
+/* Mark objects recorded in rebase state files as reachable. */
+static void add_rebase_files(struct rev_info *revs)
+{
+	struct strbuf buf = STRBUF_INIT;
+	size_t len;
+	const char *path[] = {
+		"rebase-apply/autostash",
+		"rebase-apply/orig-head",
+		"rebase-merge/autostash",
+		"rebase-merge/orig-head",
+	};
+	struct worktree **worktrees = get_worktrees(the_repository);
+
+	for (struct worktree **wt = worktrees; *wt; wt++) {
+		char *wt_gitdir = get_worktree_git_dir(*wt);
+
+		strbuf_reset(&buf);
+		strbuf_addstr(&buf, wt_gitdir);
+		strbuf_complete(&buf, '/');
+		len = buf.len;
+		for (size_t i = 0; i < ARRAY_SIZE(path); i++) {
+			strbuf_setlen(&buf, len);
+			strbuf_addstr(&buf, path[i]);
+			add_one_file(buf.buf, revs);
+		}
+
+		free(wt_gitdir);
+	}
+	strbuf_release(&buf);
+	free_worktrees(worktrees);
+}
+
+static int add_one_ref(const struct reference *ref, void *cb_data)
 {
 	struct rev_info *revs = (struct rev_info *)cb_data;
 	struct object *object;
 
-	if ((flag & REF_ISSYMREF) && (flag & REF_ISBROKEN)) {
-		warning("symbolic ref is dangling: %s", path);
+	if ((ref->flags & REF_ISSYMREF) && (ref->flags & REF_ISBROKEN)) {
+		warning("symbolic ref is dangling: %s", ref->name);
 		return 0;
 	}
 
-	object = parse_object_or_die(oid, path);
+	object = parse_object_or_die(the_repository, ref->oid, ref->name);
 	add_pending_object(revs, object, "");
 
 	return 0;
@@ -48,7 +103,9 @@ static int add_one_ref(const char *path, const struct object_id *oid,
  * The traversal will have already marked us as SEEN, so we
  * only need to handle any progress reporting here.
  */
-static void mark_object(struct object *obj, const char *name, void *data)
+static void mark_object(struct object *obj UNUSED,
+			const char *name UNUSED,
+			void *data)
 {
 	update_progress(data);
 }
@@ -63,35 +120,101 @@ struct recent_data {
 	timestamp_t timestamp;
 	report_recent_object_fn *cb;
 	int ignore_in_core_kept_packs;
+
+	struct oidset extra_recent_oids;
+	int extra_recent_oids_loaded;
 };
 
-static void add_recent_object(const struct object_id *oid,
-			      struct packed_git *pack,
-			      off_t offset,
-			      timestamp_t mtime,
-			      struct recent_data *data)
+static int run_one_gc_recent_objects_hook(struct oidset *set,
+					    const char *args)
 {
-	struct object *obj;
-	enum object_type type;
+	struct child_process cmd = CHILD_PROCESS_INIT;
+	struct strbuf buf = STRBUF_INIT;
+	FILE *out;
+	int ret = 0;
 
-	if (mtime <= data->timestamp)
+	cmd.use_shell = 1;
+	cmd.out = -1;
+
+	strvec_push(&cmd.args, args);
+
+	if (start_command(&cmd))
+		return -1;
+
+	out = xfdopen(cmd.out, "r");
+	while (strbuf_getline(&buf, out) != EOF) {
+		struct object_id oid;
+		const char *rest;
+
+		if (parse_oid_hex(buf.buf, &oid, &rest) || *rest) {
+			ret = error(_("invalid extra cruft tip: '%s'"), buf.buf);
+			break;
+		}
+
+		oidset_insert(set, &oid);
+	}
+
+	fclose(out);
+	ret |= finish_command(&cmd);
+
+	strbuf_release(&buf);
+	return ret;
+}
+
+static void load_gc_recent_objects(struct recent_data *data)
+{
+	const struct string_list *programs;
+	int ret = 0;
+	size_t i;
+
+	data->extra_recent_oids_loaded = 1;
+
+	if (repo_config_get_string_multi(the_repository, "gc.recentobjectshook", &programs))
 		return;
 
-	/*
-	 * We do not want to call parse_object here, because
-	 * inflating blobs and trees could be very expensive.
-	 * However, we do need to know the correct type for
-	 * later processing, and the revision machinery expects
-	 * commits and tags to have been parsed.
-	 */
-	type = oid_object_info(the_repository, oid, NULL);
-	if (type < 0)
-		die("unable to get object info for %s", oid_to_hex(oid));
+	for (i = 0; i < programs->nr; i++) {
+		ret = run_one_gc_recent_objects_hook(&data->extra_recent_oids,
+						       programs->items[i].string);
+		if (ret)
+			die(_("unable to enumerate additional recent objects"));
+	}
+}
 
-	switch (type) {
+static int obj_is_recent(const struct object_id *oid, timestamp_t mtime,
+			 struct recent_data *data)
+{
+	if (mtime > data->timestamp)
+		return 1;
+
+	if (!data->extra_recent_oids_loaded)
+		load_gc_recent_objects(data);
+	return oidset_contains(&data->extra_recent_oids, oid);
+}
+
+static int want_recent_object(struct recent_data *data,
+			      const struct object_id *oid)
+{
+	if (data->ignore_in_core_kept_packs &&
+	    has_object_kept_pack(data->revs->repo, oid, KEPT_PACK_IN_CORE))
+		return 0;
+	return 1;
+}
+
+static int add_recent_object(const struct object_id *oid,
+			     struct object_info *oi,
+			     void *cb_data)
+{
+	struct recent_data *data = cb_data;
+	struct object *obj;
+
+	if (!want_recent_object(data, oid) ||
+	    !obj_is_recent(oid, *oi->mtimep, data))
+		return 0;
+
+	switch (*oi->typep) {
 	case OBJ_TAG:
 	case OBJ_COMMIT:
-		obj = parse_object_or_die(oid, NULL);
+		obj = parse_object_or_die(the_repository, oid, NULL);
 		break;
 	case OBJ_TREE:
 		obj = (struct object *)lookup_tree(the_repository, oid);
@@ -101,76 +224,23 @@ static void add_recent_object(const struct object_id *oid,
 		break;
 	default:
 		die("unknown object type for %s: %s",
-		    oid_to_hex(oid), type_name(type));
+		    oid_to_hex(oid), type_name(*oi->typep));
 	}
 
 	if (!obj)
 		die("unable to lookup %s", oid_to_hex(oid));
+	if (obj->flags & SEEN)
+		return 0;
 
 	add_pending_object(data->revs, obj, "");
-	if (data->cb)
-		data->cb(obj, pack, offset, mtime);
-}
-
-static int want_recent_object(struct recent_data *data,
-			      const struct object_id *oid)
-{
-	if (data->ignore_in_core_kept_packs &&
-	    has_object_kept_pack(oid, IN_CORE_KEEP_PACKS))
-		return 0;
-	return 1;
-}
-
-static int add_recent_loose(const struct object_id *oid,
-			    const char *path, void *data)
-{
-	struct stat st;
-	struct object *obj;
-
-	if (!want_recent_object(data, oid))
-		return 0;
-
-	obj = lookup_object(the_repository, oid);
-
-	if (obj && obj->flags & SEEN)
-		return 0;
-
-	if (stat(path, &st) < 0) {
-		/*
-		 * It's OK if an object went away during our iteration; this
-		 * could be due to a simultaneous repack. But anything else
-		 * we should abort, since we might then fail to mark objects
-		 * which should not be pruned.
-		 */
-		if (errno == ENOENT)
-			return 0;
-		return error_errno("unable to stat %s", oid_to_hex(oid));
+	if (data->cb) {
+		if (oi->source_infop->source->type == ODB_SOURCE_PACKED)
+			data->cb(obj, oi->source_infop->u.packed.pack,
+				 oi->source_infop->u.packed.offset, *oi->mtimep);
+		else
+			data->cb(obj, NULL, 0, *oi->mtimep);
 	}
 
-	add_recent_object(oid, NULL, 0, st.st_mtime, data);
-	return 0;
-}
-
-static int add_recent_packed(const struct object_id *oid,
-			     struct packed_git *p, uint32_t pos,
-			     void *data)
-{
-	struct object *obj;
-	timestamp_t mtime = p->mtime;
-
-	if (!want_recent_object(data, oid))
-		return 0;
-
-	obj = lookup_object(the_repository, oid);
-
-	if (obj && obj->flags & SEEN)
-		return 0;
-	if (p->is_cruft) {
-		if (load_pack_mtimes(p) < 0)
-			die(_("could not load cruft pack .mtimes"));
-		mtime = nth_packed_mtime(p, pos);
-	}
-	add_recent_object(oid, p, nth_packed_object_offset(p, pos), mtime, data);
 	return 0;
 }
 
@@ -180,7 +250,15 @@ int add_unseen_recent_objects_to_traversal(struct rev_info *revs,
 					   int ignore_in_core_kept_packs)
 {
 	struct recent_data data;
-	enum for_each_object_flags flags;
+	unsigned flags;
+	enum object_type type;
+	time_t mtime;
+	struct odb_source_info source_info;
+	struct object_info oi = {
+		.mtimep = &mtime,
+		.typep = &type,
+		.source_infop = &source_info,
+	};
 	int r;
 
 	data.revs = revs;
@@ -188,24 +266,30 @@ int add_unseen_recent_objects_to_traversal(struct rev_info *revs,
 	data.cb = cb;
 	data.ignore_in_core_kept_packs = ignore_in_core_kept_packs;
 
-	r = for_each_loose_object(add_recent_loose, &data,
-				  FOR_EACH_OBJECT_LOCAL_ONLY);
-	if (r)
-		return r;
+	oidset_init(&data.extra_recent_oids, 0);
+	data.extra_recent_oids_loaded = 0;
 
-	flags = FOR_EACH_OBJECT_LOCAL_ONLY | FOR_EACH_OBJECT_PACK_ORDER;
+	flags = ODB_FOR_EACH_OBJECT_LOCAL_ONLY | ODB_FOR_EACH_OBJECT_PACK_ORDER;
 	if (ignore_in_core_kept_packs)
-		flags |= FOR_EACH_OBJECT_SKIP_IN_CORE_KEPT_PACKS;
+		flags |= ODB_FOR_EACH_OBJECT_SKIP_IN_CORE_KEPT_PACKS;
 
-	return for_each_packed_object(add_recent_packed, &data, flags);
+	r = odb_for_each_object(revs->repo->objects, &oi, add_recent_object, &data, flags);
+	if (r)
+		goto done;
+
+done:
+	oidset_clear(&data.extra_recent_oids);
+
+	return r;
 }
 
 static int mark_object_seen(const struct object_id *oid,
 			     enum object_type type,
-			     int exclude,
-			     uint32_t name_hash,
-			     struct packed_git *found_pack,
-			     off_t found_offset)
+			     int exclude UNUSED,
+			     uint32_t name_hash UNUSED,
+			     struct packed_git *found_pack UNUSED,
+			     off_t found_offset UNUSED,
+			     void *payload UNUSED)
 {
 	struct object *obj = lookup_object_by_type(the_repository, oid, type);
 	if (!obj)
@@ -233,11 +317,15 @@ void mark_reachable_objects(struct rev_info *revs, int mark_reflog,
 	add_index_objects_to_pending(revs, 0);
 
 	/* Add all external refs */
-	for_each_ref(add_one_ref, revs);
+	refs_for_each_ref(get_main_ref_store(the_repository), add_one_ref,
+			  revs);
 
 	/* detached HEAD is not included in the list above */
-	head_ref(add_one_ref, revs);
-	other_head_refs(add_one_ref, revs);
+	refs_head_ref(get_main_ref_store(the_repository), add_one_ref, revs);
+	other_head_refs(the_repository, add_one_ref, revs);
+
+	/* rebase autostash and orig-head */
+	add_rebase_files(revs);
 
 	/* Add all reflog info */
 	if (mark_reflog)

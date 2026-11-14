@@ -1,15 +1,18 @@
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "test-tool.h"
-#include "cache.h"
 #include "advice.h"
 #include "config.h"
+#include "environment.h"
+#include "setup.h"
 
 int cmd__advise_if_enabled(int argc, const char **argv)
 {
 	if (argc != 2)
 		die("usage: %s <advice>", argv[0]);
 
-	setup_git_directory();
-	git_config(git_default_config, NULL);
+	setup_git_directory(the_repository);
+	repo_config(the_repository, git_default_config, NULL);
 
 	/*
 	 * Any advice type can be used for testing, but NESTED_TAG was

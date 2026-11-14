@@ -36,28 +36,6 @@ test_expect_success 'setup remote repository' '
 
 setup_askpass_helper
 
-cat >exp <<EOF
-GET  /smart/test_repo.git/info/refs?service=git-upload-pack HTTP/1.1 200
-POST /smart/test_repo.git/git-upload-pack HTTP/1.1 200
-EOF
-test_expect_success 'no empty path components' '
-	# Clear the log, so that it does not affect the "used receive-pack
-	# service" test which reads the log too.
-	test_when_finished ">\"\$HTTPD_ROOT_PATH\"/access.log" &&
-
-	# In the URL, add a trailing slash, and see if git appends yet another
-	# slash.
-	cd "$ROOT_PATH" &&
-	git clone $HTTPD_URL/smart/test_repo.git/ test_repo_clone &&
-
-	# NEEDSWORK: If the overspecification of the expected result is reduced, we
-	# might be able to run this test in all protocol versions.
-	if test "$GIT_TEST_PROTOCOL_VERSION" = 0
-	then
-		check_access_log exp
-	fi
-'
-
 test_expect_success 'clone remote repository' '
 	rm -rf test_repo_clone &&
 	git clone $HTTPD_URL/smart/test_repo.git test_repo_clone &&
@@ -67,6 +45,10 @@ test_expect_success 'clone remote repository' '
 '
 
 test_expect_success 'push to remote repository (standard)' '
+	# Clear the log, so that the "used receive-pack service" test below
+	# sees just what we did here.
+	>"$HTTPD_ROOT_PATH"/access.log &&
+
 	cd "$ROOT_PATH"/test_repo_clone &&
 	: >path2 &&
 	git add path2 &&
@@ -74,10 +56,19 @@ test_expect_success 'push to remote repository (standard)' '
 	git commit -m path2 &&
 	HEAD=$(git rev-parse --verify HEAD) &&
 	GIT_TRACE_CURL=true git push -v -v 2>err &&
-	! grep "Expect: 100-continue" err &&
-	grep "POST git-receive-pack ([0-9]* bytes)" err &&
+	test_grep ! "Expect: 100-continue" err &&
+	test_grep "POST git-receive-pack ([0-9]* bytes)" err &&
 	(cd "$HTTPD_DOCUMENT_ROOT_PATH"/test_repo.git &&
 	 test $HEAD = $(git rev-parse --verify HEAD))
+'
+
+test_expect_success 'used receive-pack service' '
+	cat >exp <<-\EOF &&
+	GET  /smart/test_repo.git/info/refs?service=git-receive-pack HTTP/1.1 200
+	POST /smart/test_repo.git/git-receive-pack HTTP/1.1 200
+	EOF
+
+	check_access_log exp
 '
 
 test_expect_success 'push to remote repository (standard) with sending Accept-Language' '
@@ -93,7 +84,7 @@ test_expect_success 'push to remote repository (standard) with sending Accept-La
 	git commit -m path_lang &&
 	HEAD=$(git rev-parse --verify HEAD) &&
 	GIT_TRACE_CURL=true LANGUAGE="ko_KR.UTF-8" git push -v -v 2>err &&
-	! grep "Expect: 100-continue" err &&
+	test_grep ! "Expect: 100-continue" err &&
 
 	grep "=> Send header: Accept-Language:" err >err.language &&
 	test_cmp exp err.language
@@ -141,28 +132,6 @@ test_expect_success 'rejected update prints status' '
 '
 rm -f "$HTTPD_DOCUMENT_ROOT_PATH/test_repo.git/hooks/update"
 
-cat >exp <<EOF
-GET  /smart/test_repo.git/info/refs?service=git-upload-pack HTTP/1.1 200
-POST /smart/test_repo.git/git-upload-pack HTTP/1.1 200
-GET  /smart/test_repo.git/info/refs?service=git-receive-pack HTTP/1.1 200
-POST /smart/test_repo.git/git-receive-pack HTTP/1.1 200
-GET  /smart/test_repo.git/info/refs?service=git-receive-pack HTTP/1.1 200
-GET  /smart/test_repo.git/info/refs?service=git-receive-pack HTTP/1.1 200
-POST /smart/test_repo.git/git-receive-pack HTTP/1.1 200
-GET  /smart/test_repo.git/info/refs?service=git-receive-pack HTTP/1.1 200
-POST /smart/test_repo.git/git-receive-pack HTTP/1.1 200
-GET  /smart/test_repo.git/info/refs?service=git-receive-pack HTTP/1.1 200
-POST /smart/test_repo.git/git-receive-pack HTTP/1.1 200
-EOF
-test_expect_success 'used receive-pack service' '
-	# NEEDSWORK: If the overspecification of the expected result is reduced, we
-	# might be able to run this test in all protocol versions.
-	if test "$GIT_TEST_PROTOCOL_VERSION" = 0
-	then
-		check_access_log exp
-	fi
-'
-
 test_http_push_nonff "$HTTPD_DOCUMENT_ROOT_PATH"/test_repo.git \
 	"$ROOT_PATH"/test_repo_clone main 		success
 
@@ -179,12 +148,12 @@ test_expect_success 'push fails for non-fast-forward refs unmatched by remote he
 	test_must_fail git push -v origin +main main:niam >output 2>&1'
 
 test_expect_success 'push fails for non-fast-forward refs unmatched by remote helper: remote output' '
-	grep "^ + [a-f0-9]*\.\.\.[a-f0-9]* *main -> main (forced update)$" output &&
-	grep "^ ! \[rejected\] *main -> niam (non-fast-forward)$" output
+	test_grep "^ + [a-f0-9]*\.\.\.[a-f0-9]* *main -> main (forced update)$" output &&
+	test_grep "^ ! \[rejected\] *main -> niam (non-fast-forward)$" output
 '
 
 test_expect_success 'push fails for non-fast-forward refs unmatched by remote helper: our output' '
-	test_i18ngrep "Updates were rejected because" \
+	test_grep "Updates were rejected because" \
 		output
 '
 
@@ -194,7 +163,7 @@ test_expect_success 'push (chunked)' '
 	HEAD=$(git rev-parse --verify HEAD) &&
 	test_config http.postbuffer 4 &&
 	git push -v -v origin $BRANCH 2>err &&
-	grep "POST git-receive-pack (chunked)" err &&
+	test_grep "POST git-receive-pack (chunked)" err &&
 	(cd "$HTTPD_DOCUMENT_ROOT_PATH"/test_repo.git &&
 	 test $HEAD = $(git rev-parse --verify HEAD))
 '
@@ -246,15 +215,15 @@ test_expect_success 'push --atomic also prevents branch creation, reports collat
 	test_cmp expected actual &&
 
 	# the failed refs should be indicated to the user
-	grep "^ ! .*rejected.* main -> main" output &&
+	test_grep "^ ! .*rejected.* main -> main" output &&
 
 	# the collateral failure refs should be indicated to the user
-	grep "^ ! .*rejected.* atomic -> atomic .*atomic push failed" output &&
-	grep "^ ! .*rejected.* collateral -> collateral .*atomic push failed" output &&
+	test_grep "^ ! .*rejected.* atomic -> atomic .*atomic push failed" output &&
+	test_grep "^ ! .*rejected.* collateral -> collateral .*atomic push failed" output &&
 
 	# never report what we do not push
-	! grep "^ ! .*rejected.* atomic1 " output &&
-	! grep "^ ! .*rejected.* other " output
+	test_grep ! "^ ! .*rejected.* atomic1 " output &&
+	test_grep ! "^ ! .*rejected.* other " output
 '
 
 test_expect_success 'push --atomic fails on server-side errors' '
@@ -263,8 +232,9 @@ test_expect_success 'push --atomic fails on server-side errors' '
 	test_config -C "$d" http.receivepack true &&
 	up="$HTTPD_URL"/smart/atomic-branches.git &&
 
-	# break ref updates for other on the remote site
-	mkdir "$d/refs/heads/other.lock" &&
+	# Create d/f conflict to break ref updates for other on the remote site.
+	git -C "$d" update-ref -d refs/heads/other &&
+	git -C "$d" update-ref refs/heads/other/conflict HEAD &&
 
 	# add the new commit to other
 	git branch -f other collateral &&
@@ -272,24 +242,15 @@ test_expect_success 'push --atomic fails on server-side errors' '
 	# --atomic should cause entire push to be rejected
 	test_must_fail git push --atomic "$up" atomic other 2>output  &&
 
-	# the new branch should not have been created upstream
+	# The atomic and other branches should not be created upstream.
 	test_must_fail git -C "$d" show-ref --verify refs/heads/atomic &&
-
-	# upstream should still reflect atomic2, the last thing we pushed
-	# successfully
-	git rev-parse atomic2 >expected &&
-	# ...to other.
-	git -C "$d" rev-parse refs/heads/other >actual &&
-	test_cmp expected actual &&
-
-	# the new branch should not have been created upstream
-	test_must_fail git -C "$d" show-ref --verify refs/heads/atomic &&
+	test_must_fail git -C "$d" show-ref --verify refs/heads/other &&
 
 	# the failed refs should be indicated to the user
-	grep "^ ! .*rejected.* other -> other .*atomic transaction failed" output &&
+	test_grep "^ ! .*rejected.* other -> other .*atomic transaction failed" output &&
 
 	# the collateral failure refs should be indicated to the user
-	grep "^ ! .*rejected.* atomic -> atomic .*atomic transaction failed" output
+	test_grep "^ ! .*rejected.* atomic -> atomic .*atomic transaction failed" output
 '
 
 test_expect_success 'push --all can push to empty repo' '
@@ -328,7 +289,7 @@ test_expect_success TTY 'push shows progress when stderr is a tty' '
 	cd "$ROOT_PATH"/test_repo_clone &&
 	test_commit noisy &&
 	test_terminal git push >output 2>&1 &&
-	test_i18ngrep "^Writing objects" output
+	test_grep "^Writing objects" output
 '
 
 test_expect_success TTY 'push --quiet silences status and progress' '
@@ -342,16 +303,16 @@ test_expect_success TTY 'push --no-progress silences progress but not status' '
 	cd "$ROOT_PATH"/test_repo_clone &&
 	test_commit no-progress &&
 	test_terminal git push --no-progress >output 2>&1 &&
-	test_i18ngrep "^To http" output &&
-	test_i18ngrep ! "^Writing objects" output
+	test_grep "^To http" output &&
+	test_grep ! "^Writing objects" output
 '
 
 test_expect_success 'push --progress shows progress to non-tty' '
 	cd "$ROOT_PATH"/test_repo_clone &&
 	test_commit progress &&
 	git push --progress >output 2>&1 &&
-	test_i18ngrep "^To http" output &&
-	test_i18ngrep "^Writing objects" output
+	test_grep "^To http" output &&
+	test_grep "^Writing objects" output
 '
 
 test_expect_success 'http push gives sane defaults to reflog' '
@@ -382,7 +343,7 @@ test_expect_success 'push over smart http with auth' '
 	git push "$HTTPD_URL"/auth/smart/test_repo.git &&
 	git --git-dir="$HTTPD_DOCUMENT_ROOT_PATH/test_repo.git" \
 		log -1 --format=%s >actual &&
-	expect_askpass both user@host &&
+	expect_askpass both user%40host &&
 	test_cmp expect actual
 '
 
@@ -394,7 +355,7 @@ test_expect_success 'push to auth-only-for-push repo' '
 	git push "$HTTPD_URL"/auth-push/smart/test_repo.git &&
 	git --git-dir="$HTTPD_DOCUMENT_ROOT_PATH/test_repo.git" \
 		log -1 --format=%s >actual &&
-	expect_askpass both user@host &&
+	expect_askpass both user%40host &&
 	test_cmp expect actual
 '
 
@@ -424,7 +385,7 @@ test_expect_success 'push into half-auth-complete requires password' '
 	git push "$HTTPD_URL/half-auth-complete/smart/half-auth.git" &&
 	git --git-dir="$HTTPD_DOCUMENT_ROOT_PATH/half-auth.git" \
 		log -1 --format=%s >actual &&
-	expect_askpass both user@host &&
+	expect_askpass both user%40host &&
 	test_cmp expect actual
 '
 
@@ -481,7 +442,7 @@ test_expect_success 'push status output scrubs password' '
 		"$HTTPD_URL_USER_PASS/smart/test_repo.git" \
 		+HEAD:scrub >status &&
 	# should have been scrubbed down to vanilla URL
-	grep "^To $HTTPD_URL/smart/test_repo.git" status
+	test_grep "^To $HTTPD_URL/smart/test_repo.git" status
 '
 
 test_expect_success 'clone/fetch scrubs password from reflogs' '
@@ -495,8 +456,8 @@ test_expect_success 'clone/fetch scrubs password from reflogs' '
 		+main:main &&
 	# should have been scrubbed down to vanilla URL
 	git log -g main >reflog &&
-	grep "$HTTPD_URL" reflog &&
-	! grep "$HTTPD_URL_USER_PASS" reflog
+	test_grep "$HTTPD_URL" reflog &&
+	test_grep ! "$HTTPD_URL_USER_PASS" reflog
 '
 
 test_expect_success 'Non-ASCII branch name can be used with --force-with-lease' '
@@ -520,10 +481,10 @@ test_expect_success 'colorize errors/hints' '
 		-c color.push=always \
 		push origin origin/main^:main 2>act &&
 	test_decode_color <act >decoded &&
-	test_i18ngrep "<RED>.*rejected.*<RESET>" decoded &&
-	test_i18ngrep "<RED>error: failed to push some refs" decoded &&
-	test_i18ngrep "<YELLOW>hint: " decoded &&
-	test_i18ngrep ! "^hint: " decoded
+	test_grep "<RED>.*rejected.*<RESET>" decoded &&
+	test_grep "<RED>error: failed to push some refs" decoded &&
+	test_grep "<YELLOW>hint: " decoded &&
+	test_grep ! "^hint: " decoded
 '
 
 test_expect_success 'report error server does not provide ref status' '

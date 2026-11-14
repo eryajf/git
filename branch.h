@@ -15,8 +15,6 @@ enum branch_track {
 	BRANCH_TRACK_SIMPLE,
 };
 
-extern enum branch_track git_branch_track;
-
 /* Functions for acting on the information about branches. */
 
 /**
@@ -36,10 +34,13 @@ extern enum branch_track git_branch_track;
  *     causes new_ref to track whatever orig_ref tracks.
  *
  *   - quiet suppresses tracking information.
+ *
+ * Returns 0 on success, or -1 if the tracking configuration could not be
+ * written.
  */
-void dwim_and_setup_tracking(struct repository *r, const char *new_ref,
-			     const char *orig_ref, enum branch_track track,
-			     int quiet);
+int dwim_and_setup_tracking(struct repository *r, const char *new_ref,
+			    const char *orig_ref, enum branch_track track,
+			    int quiet);
 
 /*
  * Creates a new branch, where:
@@ -65,12 +66,14 @@ void dwim_and_setup_tracking(struct repository *r, const char *new_ref,
  *
  *   - dry_run causes the branch to be validated but not created.
  *
+ * Returns 0 on success, or -1 if the tracking configuration could not be
+ * written.
  */
-void create_branch(struct repository *r,
-		   const char *name, const char *start_name,
-		   int force, int clobber_head_ok,
-		   int reflog, int quiet, enum branch_track track,
-		   int dry_run);
+int create_branch(struct repository *r,
+		  const char *name, const char *start_name,
+		  int force, int clobber_head_ok,
+		  int reflog, int quiet, enum branch_track track,
+		  int dry_run);
 
 /*
  * Creates a new branch in a repository and its submodules (and its
@@ -78,26 +81,26 @@ void create_branch(struct repository *r,
  * those of create_branch() except for start_name, which is represented
  * by two different parameters:
  *
- * - start_commitish is the commit-ish, in repository r, that determines
+ * - start_committish is the commit-ish, in repository r, that determines
  *   which commits the branches will point to. The superproject branch
- *   will point to the commit of start_commitish and the submodule
- *   branches will point to the gitlink commit oids in start_commitish's
+ *   will point to the commit of start_committish and the submodule
+ *   branches will point to the gitlink commit oids in start_committish's
  *   tree.
  *
  * - tracking_name is the name of the ref, in repository r, that will be
  *   used to set up tracking information. This value is propagated to
  *   all submodules, which will evaluate the ref using their own ref
- *   stores. If NULL, this defaults to start_commitish.
+ *   stores. If NULL, this defaults to start_committish.
  *
- * When this function is called on the superproject, start_commitish
+ * When this function is called on the superproject, start_committish
  * can be any user-provided ref and tracking_name can be NULL (similar
  * to create_branches()). But when recursing through submodules,
- * start_commitish is the plain gitlink commit oid. Since the oid cannot
+ * start_committish is the plain gitlink commit oid. Since the oid cannot
  * be used for tracking information, tracking_name is propagated and
  * used for tracking instead.
  */
 void create_branches_recursively(struct repository *r, const char *name,
-				 const char *start_commitish,
+				 const char *start_committish,
 				 const char *tracking_name, int force,
 				 int reflog, int quiet, enum branch_track track,
 				 int dry_run);
@@ -107,6 +110,12 @@ void create_branches_recursively(struct repository *r, const char *name,
  * then return the path to that worktree.
  */
 const char *branch_checked_out(const char *refname);
+
+/*
+ * If the branch at 'refname' is currently used for bisecting in a
+ * worktree, then return the path to that worktree.
+ */
+const char *branch_bisecting(const char *refname);
 
 /*
  * Check if 'name' can be a valid name for a branch; die otherwise.
@@ -123,6 +132,8 @@ int validate_branchname(const char *name, struct strbuf *ref);
  */
 int validate_new_branchname(const char *name, struct strbuf *ref, int force);
 
+#define REMOVE_BRANCH_STATE_VERBOSE (1u << 0)
+#define REMOVE_BRANCH_STATE_PRESERVE_CONFLICT_LABELS (1u << 1)
 /*
  * Remove information about the merge state on the current
  * branch. (E.g., MERGE_HEAD)
@@ -133,7 +144,7 @@ void remove_merge_branch_state(struct repository *r);
  * Remove information about the state of working on the current
  * branch. (E.g., MERGE_HEAD)
  */
-void remove_branch_state(struct repository *r, int verbose);
+void remove_branch_state(struct repository *r, unsigned flags);
 
 /*
  * Configure local branch "local" as downstream to branch "remote"
@@ -154,13 +165,5 @@ int read_branch_desc(struct strbuf *, const char *branch_name);
  * it is.
  */
 void die_if_checked_out(const char *branch, int ignore_current_worktree);
-
-/*
- * Update all per-worktree HEADs pointing at the old ref to point the new ref.
- * This will be used when renaming a branch. Returns 0 if successful, non-zero
- * otherwise.
- */
-int replace_each_worktree_head_symref(const char *oldref, const char *newref,
-				      const char *logmsg);
 
 #endif

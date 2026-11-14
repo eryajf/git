@@ -25,6 +25,7 @@ compare_head()
 
 
 test_expect_success 'setup a submodule tree' '
+	git config --global protocol.file.allow always &&
 	echo file > file &&
 	git add file &&
 	test_tick &&
@@ -252,6 +253,25 @@ test_expect_success 'submodule update --remote should fetch upstream changes' '
 	 git submodule update --remote --force submodule &&
 	 cd submodule &&
 	 test "$(git log -1 --oneline)" = "$(GIT_DIR=../../submodule/.git git log -1 --oneline)"
+	)
+'
+
+test_expect_success 'submodule update --remote resolves URL rewrites' '
+	test_config_global "url.$(pwd)/.insteadOf" local: &&
+	mkdir alias-super alias-submodule &&
+	(
+		cd alias-submodule &&
+		git init &&
+		git commit --allow-empty --message "Initial commit"
+	) &&
+	(
+		cd alias-super &&
+		git init &&
+		git submodule add local:alias-submodule submodule &&
+		git submodule update --force &&
+		git -C submodule remote rename origin upstream &&
+		git -C submodule remote add fork user@host &&
+		git submodule update --remote
 	)
 '
 
@@ -626,10 +646,10 @@ test_expect_success 'submodule update - update=none in .git/config' '
 	  compare_head
 	 ) &&
 	 git diff --name-only >out &&
-	 grep ^submodule$ out &&
+	 test_grep ^submodule$ out &&
 	 git submodule update &&
 	 git diff --name-only >out &&
-	 grep ^submodule$ out &&
+	 test_grep ^submodule$ out &&
 	 (cd submodule &&
 	  compare_head
 	 ) &&
@@ -646,10 +666,10 @@ test_expect_success 'submodule update - update=none in .git/config but --checkou
 	  compare_head
 	 ) &&
 	 git diff --name-only >out &&
-	 grep ^submodule$ out &&
+	 test_grep ^submodule$ out &&
 	 git submodule update --checkout &&
 	 git diff --name-only >out &&
-	 ! grep ^submodule$ out &&
+	 test_grep ! ^submodule$ out &&
 	 (cd submodule &&
 	  ! compare_head
 	 ) &&
@@ -678,10 +698,10 @@ test_expect_success 'submodule update with pathspec warns against uninitialized 
 		git submodule init submodule &&
 
 		git submodule update submodule 2>err &&
-		! grep "Submodule path .* not initialized" err &&
+		test_grep ! "Submodule path .* not initialized" err &&
 
 		git submodule update rebasing 2>err &&
-		grep "Submodule path .rebasing. not initialized" err &&
+		test_grep "Submodule path .rebasing. not initialized" err &&
 
 		test_path_exists submodule/.git &&
 		test_path_is_missing rebasing/.git
@@ -698,7 +718,7 @@ test_expect_success 'submodule update without pathspec updates only initialized 
 		git submodule update 2>err &&
 		test_path_exists submodule/.git &&
 		test_path_is_missing rebasing/.git &&
-		! grep "Submodule path .* not initialized" err
+		test_grep ! "Submodule path .* not initialized" err
 	)
 
 '
@@ -769,7 +789,7 @@ test_expect_success 'submodule update continues after recursive checkout error' 
 	   echo "" > file
 	  )
 	 ) &&
-	 test_must_fail git submodule update --recursive &&
+	 test_expect_code 1 git submodule update --recursive &&
 	 (cd submodule2 &&
 	  git rev-parse --verify HEAD >../actual
 	 ) &&
@@ -944,7 +964,7 @@ test_expect_success 'submodule update places git-dir in superprojects git-dir re
 	git clone super_update_r super_update_r2 &&
 	(cd super_update_r2 &&
 	 git submodule update --init --recursive >actual &&
-	 test_i18ngrep "Submodule path .submodule/subsubmodule.: checked out" actual &&
+	 test_grep "Submodule path .submodule/subsubmodule.: checked out" actual &&
 	 (cd submodule/subsubmodule &&
 	  git log > ../../expected
 	 ) &&
@@ -1024,7 +1044,7 @@ test_expect_success 'submodule update clone shallow submodule outside of depth' 
 		# unadvertised objects, so restrict this test to v0.
 		test_must_fail env GIT_TEST_PROTOCOL_VERSION=0 \
 			git submodule update --init --depth=1 2>actual &&
-		test_i18ngrep "Direct fetching of that commit failed." actual &&
+		test_grep "Direct fetching of that commit failed." actual &&
 		git -C ../submodule config uploadpack.allowReachableSHA1InWant true &&
 		git submodule update --init --depth=1 >actual &&
 		git -C submodule log --oneline >out &&
@@ -1038,33 +1058,41 @@ test_expect_success 'submodule update --recursive drops module name before recur
 	  git checkout HEAD^
 	 ) &&
 	 git submodule update --recursive deeper/submodule >actual &&
-	 test_i18ngrep "Submodule path .deeper/submodule/subsubmodule.: checked out" actual
+	 test_grep "Submodule path .deeper/submodule/subsubmodule.: checked out" actual
 	)
 '
 
 test_expect_success 'submodule update can be run in parallel' '
 	(cd super2 &&
 	 GIT_TRACE=$(pwd)/trace.out git submodule update --jobs 7 &&
-	 grep "7 tasks" trace.out &&
+	 test_grep "7 tasks" trace.out &&
 	 git config submodule.fetchJobs 8 &&
 	 GIT_TRACE=$(pwd)/trace.out git submodule update &&
-	 grep "8 tasks" trace.out &&
+	 test_grep "8 tasks" trace.out &&
 	 GIT_TRACE=$(pwd)/trace.out git submodule update --jobs 9 &&
-	 grep "9 tasks" trace.out
+	 test_grep "9 tasks" trace.out
 	)
+'
+
+test_expect_success 'submodule update honors fetch jobs config from .gitmodules' '
+	test_when_finished "rm -rf super3" &&
+	git clone cloned super3 &&
+	git -C super3 config -f .gitmodules submodule.fetchJobs 67 &&
+	GIT_TRACE="$(pwd)/trace.out" git -C super3 submodule update --init &&
+	test_grep "67 tasks" trace.out
 '
 
 test_expect_success 'git clone passes the parallel jobs config on to submodules' '
 	test_when_finished "rm -rf super4" &&
 	GIT_TRACE=$(pwd)/trace.out git clone --recurse-submodules --jobs 7 . super4 &&
-	grep "7 tasks" trace.out &&
+	test_grep "7 tasks" trace.out &&
 	rm -rf super4 &&
 	git config --global submodule.fetchJobs 8 &&
 	GIT_TRACE=$(pwd)/trace.out git clone --recurse-submodules . super4 &&
-	grep "8 tasks" trace.out &&
+	test_grep "8 tasks" trace.out &&
 	rm -rf super4 &&
 	GIT_TRACE=$(pwd)/trace.out git clone --recurse-submodules --jobs 9 . super4 &&
-	grep "9 tasks" trace.out &&
+	test_grep "9 tasks" trace.out &&
 	rm -rf super4
 '
 
@@ -1092,12 +1120,17 @@ test_expect_success 'submodule update --quiet passes quietness to fetch with a s
 	) &&
 	git clone super4 super5 &&
 	(cd super5 &&
-	 git submodule update --quiet --init --depth=1 submodule3 >out 2>err &&
+	 # This test var can mess with the stderr output checked in this test.
+	 GIT_TEST_NAME_HASH_VERSION=1 \
+	 GIT_TEST_PACK_PATH_WALK=0 \
+		git submodule update --quiet --init --depth=1 submodule3 >out 2>err &&
 	 test_must_be_empty out &&
 	 test_must_be_empty err
 	) &&
 	git clone super4 super6 &&
 	(cd super6 &&
+	 # This test variable will create a "warning" message to stderr
+	 GIT_TEST_PACK_PATH_WALK=0 \
 	 git submodule update --init --depth=1 submodule3 >out 2>err &&
 	 test_file_not_empty out &&
 	 test_file_not_empty err
@@ -1129,6 +1162,67 @@ test_expect_success 'setup clean recursive superproject' '
 	git -C top submodule add ../middle middle &&
 	git -C top commit -m "top" &&
 	git clone --recurse-submodules top top-clean
+'
+
+test_expect_success 'submodule update with multiple remotes' '
+	test_when_finished "rm -fr top-cloned" &&
+	cp -r top-clean top-cloned &&
+
+	# Create a commit in each repo, starting with bottom
+	test_commit -C bottom multiple_remote_commit &&
+	# Create middle commit
+	git -C middle/bottom fetch &&
+	git -C middle/bottom checkout -f FETCH_HEAD &&
+	git -C middle add bottom &&
+	git -C middle commit -m "multiple_remote_commit" &&
+	# Create top commit
+	git -C top/middle fetch &&
+	git -C top/middle checkout -f FETCH_HEAD &&
+	git -C top add middle &&
+	git -C top commit -m "multiple_remote_commit" &&
+
+	# rename the submodule remote
+	git -C top-cloned/middle remote rename origin upstream &&
+
+	# Add another remote
+	git -C top-cloned/middle remote add other bogus &&
+
+	# Make the update of "middle" a no-op, otherwise we error out
+	# because of its unmerged state
+	test_config -C top-cloned submodule.middle.update !true &&
+	git -C top-cloned submodule update --recursive 2>actual.err &&
+	cat >expect.err <<-\EOF &&
+	EOF
+	test_cmp expect.err actual.err
+'
+
+test_expect_success 'submodule update with renamed remote' '
+	test_when_finished "rm -fr top-cloned" &&
+	cp -r top-clean top-cloned &&
+
+	# Create a commit in each repo, starting with bottom
+	test_commit -C bottom rename_commit &&
+	# Create middle commit
+	git -C middle/bottom fetch &&
+	git -C middle/bottom checkout -f FETCH_HEAD &&
+	git -C middle add bottom &&
+	git -C middle commit -m "rename_commit" &&
+	# Create top commit
+	git -C top/middle fetch &&
+	git -C top/middle checkout -f FETCH_HEAD &&
+	git -C top add middle &&
+	git -C top commit -m "rename_commit" &&
+
+	# rename the submodule remote
+	git -C top-cloned/middle remote rename origin upstream &&
+
+	# Make the update of "middle" a no-op, otherwise we error out
+	# because of its unmerged state
+	test_config -C top-cloned submodule.middle.update !true &&
+	git -C top-cloned submodule update --recursive 2>actual.err &&
+	cat >expect.err <<-\EOF &&
+	EOF
+	test_cmp expect.err actual.err
 '
 
 test_expect_success 'submodule update should skip unmerged submodules' '
@@ -1176,6 +1270,77 @@ test_expect_success 'submodule update --recursive skip submodules with strategy=
 	Skipping submodule '\''middle/bottom'\''
 	EOF
 	test_cmp expect.err actual.err
+'
+
+add_submodule_commit_and_validate () {
+	HASH=$(git rev-parse HEAD) &&
+	git update-index --add --cacheinfo 160000,$HASH,sub &&
+	git commit -m "create submodule" &&
+	echo "160000 commit $HASH	sub" >expect &&
+	git ls-tree HEAD -- sub >actual &&
+	test_cmp expect actual
+}
+
+test_expect_success 'commit with staged submodule change' '
+	add_submodule_commit_and_validate
+'
+
+test_expect_success 'commit with staged submodule change with ignoreSubmodules dirty' '
+	test_config diff.ignoreSubmodules dirty &&
+	add_submodule_commit_and_validate
+'
+
+test_expect_success 'commit with staged submodule change with ignoreSubmodules all' '
+	test_config diff.ignoreSubmodules all &&
+	add_submodule_commit_and_validate
+'
+
+test_expect_success CASE_INSENSITIVE_FS,SYMLINKS \
+	'submodule paths must not follow symlinks' '
+
+	# This is only needed because we want to run this in a self-contained
+	# test without having to spin up an HTTP server; However, it would not
+	# be needed in a real-world scenario where the submodule is simply
+	# hosted on a public site.
+	test_config_global protocol.file.allow always &&
+
+	# Make sure that Git tries to use symlinks on Windows
+	test_config_global core.symlinks true &&
+
+	tell_tale_path="$PWD/tell.tale" &&
+	git init hook &&
+	(
+		cd hook &&
+		mkdir -p y/hooks &&
+		write_script y/hooks/post-checkout <<-EOF &&
+		echo HOOK-RUN >&2
+		echo hook-run >"$tell_tale_path"
+		EOF
+		git add y/hooks/post-checkout &&
+		test_tick &&
+		git commit -m post-checkout
+	) &&
+
+	hook_repo_path="$(pwd)/hook" &&
+	git init captain &&
+	(
+		cd captain &&
+		git submodule add --name x/y "$hook_repo_path" A/modules/x &&
+		test_tick &&
+		git commit -m add-submodule &&
+
+		printf .git >dotgit.txt &&
+		git hash-object -w --stdin <dotgit.txt >dot-git.hash &&
+		printf "120000 %s 0\ta\n" "$(cat dot-git.hash)" >index.info &&
+		git update-index --index-info <index.info &&
+		test_tick &&
+		git commit -m add-symlink
+	) &&
+
+	test_path_is_missing "$tell_tale_path" &&
+	git clone --recursive captain hooked 2>err &&
+	test_grep ! HOOK-RUN err &&
+	test_path_is_missing "$tell_tale_path"
 '
 
 test_done

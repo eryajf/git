@@ -177,7 +177,7 @@ test_expect_success '--full-diff is not affected by --parents' '
 #   \ /      /\        /
 #    `---X--'  `---Y--'
 #
-# This example is explained in Documentation/rev-list-options.txt
+# This example is explained in Documentation/rev-list-options.adoc
 
 test_expect_success 'setup rebuild repo' '
 	rm -rf .git * &&
@@ -283,6 +283,24 @@ test_expect_success 'log --graph --simplify-merges --show-pulls' '
 		--simplify-merges --show-pulls \
 		-- file >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'exclude-first-parent-only with parent already seen' '
+	git checkout --orphan test-seen &&
+	git rm -rf . &&
+	test_commit r1 &&
+	git checkout -b branch-f &&
+	test_commit f &&
+	git checkout test-seen &&
+	git merge --no-ff --no-edit -m r2 branch-f &&
+	git tag r2 &&
+
+	git rev-list --exclude-first-parent-only f ^r2 >actual &&
+	git rev-parse f >expect &&
+	test_cmp expect actual &&
+
+	git rev-list --exclude-first-parent-only f r1 ^r2 >actual2 &&
+	test_cmp expect actual2
 '
 
 test_done

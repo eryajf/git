@@ -41,6 +41,10 @@ struct submodule_update_strategy {
 	.type = SM_UPDATE_UNSPECIFIED, \
 }
 
+int parse_submodule_update_strategy(const char *value,
+				    struct submodule_update_strategy *dst);
+void submodule_update_strategy_release(struct submodule_update_strategy *strategy);
+
 int is_gitmodules_unmerged(struct index_state *istate);
 int is_writing_gitmodules_ok(void);
 int is_staging_gitmodules_ok(struct index_state *istate);
@@ -70,9 +74,7 @@ void die_in_unpopulated_submodule(struct index_state *istate,
 void die_path_inside_submodule(struct index_state *istate,
 			       const struct pathspec *ps);
 enum submodule_update_type parse_submodule_update_type(const char *value);
-int parse_submodule_update_strategy(const char *value,
-				    struct submodule_update_strategy *dst);
-const char *submodule_strategy_to_string(const struct submodule_update_strategy *s);
+const char *submodule_update_type_to_string(enum submodule_update_type type);
 void handle_ignore_submodules_arg(struct diff_options *, const char *);
 void show_submodule_diff_summary(struct diff_options *o, const char *path,
 			    struct object_id *one, struct object_id *two,
@@ -103,15 +105,6 @@ int submodule_uses_gitfile(const char *path);
 int bad_to_remove_submodule(const char *path, unsigned flags);
 
 /*
- * Call add_submodule_odb_by_path() to add the submodule at the given
- * path to a list. When register_all_submodule_odb_as_alternates() is
- * called, the object stores of all submodules in that list will be
- * added as alternates in the_repository.
- */
-void add_submodule_odb_by_path(const char *path);
-int register_all_submodule_odb_as_alternates(void);
-
-/*
  * Checks if there are submodule changes in a..b. If a is the null OID,
  * checks b and all its ancestors instead.
  */
@@ -134,7 +127,8 @@ int push_unpushed_submodules(struct repository *r,
  * path of that submodule in 'buf'. Return -1 on error or when the
  * submodule is not initialized.
  */
-int submodule_to_gitdir(struct strbuf *buf, const char *submodule);
+int submodule_to_gitdir(struct repository *repo,
+			struct strbuf *buf, const char *submodule);
 
 /*
  * Given a submodule name, create a path to where the submodule's gitdir lives
@@ -148,11 +142,15 @@ void submodule_name_to_gitdir(struct strbuf *buf, struct repository *r,
  */
 int validate_submodule_git_dir(char *git_dir, const char *submodule_name);
 
+/*
+ * Make sure that the given submodule path does not follow symlinks.
+ */
+int validate_submodule_path(const char *path);
+
 #define SUBMODULE_MOVE_HEAD_DRY_RUN (1<<0)
 #define SUBMODULE_MOVE_HEAD_FORCE   (1<<1)
-int submodule_move_head(const char *path,
-			const char *old,
-			const char *new_head,
+int submodule_move_head(const char *path, const char *super_prefix,
+			const char *old_head, const char *new_head,
 			unsigned flags);
 
 void submodule_unset_core_worktree(const struct submodule *sub);
@@ -164,9 +162,8 @@ void submodule_unset_core_worktree(const struct submodule *sub);
  */
 void prepare_submodule_repo_env(struct strvec *env);
 
-#define ABSORB_GITDIR_RECURSE_SUBMODULES (1<<0)
 void absorb_git_dir_into_superproject(const char *path,
-				      unsigned flags);
+				      const char *super_prefix);
 
 /*
  * Return the absolute path of the working tree of the superproject, which this

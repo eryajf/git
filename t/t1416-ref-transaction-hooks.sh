@@ -20,11 +20,24 @@ test_expect_success 'hook allows updating ref if successful' '
 		echo "$*" >>actual
 	EOF
 	cat >expect <<-EOF &&
+		preparing
 		prepared
 		committed
 	EOF
 	git update-ref HEAD POST &&
 	test_cmp expect actual
+'
+
+test_expect_success 'hook aborts updating ref in preparing state' '
+	git reset --hard PRE &&
+	test_hook reference-transaction <<-\EOF &&
+		if test "$1" = preparing
+		then
+			exit 1
+		fi
+	EOF
+	test_must_fail git update-ref HEAD POST 2>err &&
+	test_grep "in '\''preparing'\'' phase, update aborted by the reference-transaction hook" err
 '
 
 test_expect_success 'hook aborts updating ref in prepared state' '
@@ -36,7 +49,7 @@ test_expect_success 'hook aborts updating ref in prepared state' '
 		fi
 	EOF
 	test_must_fail git update-ref HEAD POST 2>err &&
-	test_i18ngrep "ref updates aborted by hook" err
+	test_grep "in '\''prepared'\'' phase, update aborted by the reference-transaction hook" err
 '
 
 test_expect_success 'hook gets all queued updates in prepared state' '
@@ -52,7 +65,6 @@ test_expect_success 'hook gets all queued updates in prepared state' '
 		fi
 	EOF
 	cat >expect <<-EOF &&
-		$ZERO_OID $POST_OID HEAD
 		$ZERO_OID $POST_OID refs/heads/main
 	EOF
 	git update-ref HEAD POST <<-EOF &&
@@ -75,7 +87,6 @@ test_expect_success 'hook gets all queued updates in committed state' '
 		fi
 	EOF
 	cat >expect <<-EOF &&
-		$ZERO_OID $POST_OID HEAD
 		$ZERO_OID $POST_OID refs/heads/main
 	EOF
 	git update-ref HEAD POST &&
@@ -122,15 +133,99 @@ test_expect_success 'interleaving hook calls succeed' '
 
 	cat >expect <<-EOF &&
 		hooks/update refs/tags/PRE $ZERO_OID $PRE_OID
-		hooks/reference-transaction prepared
-		hooks/reference-transaction committed
 		hooks/update refs/tags/POST $ZERO_OID $POST_OID
+		hooks/reference-transaction preparing
 		hooks/reference-transaction prepared
 		hooks/reference-transaction committed
 	EOF
 
 	git push ./target-repo.git PRE POST &&
 	test_cmp expect target-repo.git/actual
+'
+
+test_expect_success 'hook captures git-symbolic-ref updates' '
+	test_when_finished "rm actual" &&
+
+	test_hook reference-transaction <<-\EOF &&
+		echo "$*" >>actual
+		while read -r line
+		do
+			printf "%s\n" "$line"
+		done >>actual
+	EOF
+
+	git symbolic-ref refs/heads/symref refs/heads/main &&
+
+	cat >expect <<-EOF &&
+	preparing
+	$ZERO_OID ref:refs/heads/main refs/heads/symref
+	prepared
+	$ZERO_OID ref:refs/heads/main refs/heads/symref
+	committed
+	$ZERO_OID ref:refs/heads/main refs/heads/symref
+	EOF
+
+	test_cmp expect actual
+'
+
+test_expect_success 'hook gets all queued symref updates' '
+	test_when_finished "rm actual" &&
+
+	git update-ref refs/heads/branch $POST_OID &&
+	git symbolic-ref refs/heads/symref refs/heads/main &&
+	git symbolic-ref refs/heads/symrefd refs/heads/main &&
+	git symbolic-ref refs/heads/symrefu refs/heads/main &&
+
+	test_hook reference-transaction <<-\EOF &&
+	echo "$*" >>actual
+	while read -r line
+	do
+		printf "%s\n" "$line"
+	done >>actual
+	EOF
+
+	# In the files backend, "delete" also triggers an additional transaction
+	# update on the packed-refs backend, which constitutes additional reflog
+	# entries.
+	cat >expect <<-EOF &&
+	preparing
+	ref:refs/heads/main $ZERO_OID refs/heads/symref
+	ref:refs/heads/main $ZERO_OID refs/heads/symrefd
+	$ZERO_OID ref:refs/heads/main refs/heads/symrefc
+	ref:refs/heads/main ref:refs/heads/branch refs/heads/symrefu
+	EOF
+
+	if test_have_prereq REFFILES
+	then
+		cat >>expect <<-EOF
+		aborted
+		$ZERO_OID $ZERO_OID refs/heads/symrefd
+		EOF
+	fi &&
+
+	cat >>expect <<-EOF &&
+	prepared
+	ref:refs/heads/main $ZERO_OID refs/heads/symref
+	ref:refs/heads/main $ZERO_OID refs/heads/symrefd
+	$ZERO_OID ref:refs/heads/main refs/heads/symrefc
+	ref:refs/heads/main ref:refs/heads/branch refs/heads/symrefu
+	committed
+	ref:refs/heads/main $ZERO_OID refs/heads/symref
+	ref:refs/heads/main $ZERO_OID refs/heads/symrefd
+	$ZERO_OID ref:refs/heads/main refs/heads/symrefc
+	ref:refs/heads/main ref:refs/heads/branch refs/heads/symrefu
+	EOF
+
+	git update-ref --no-deref --stdin <<-EOF &&
+	start
+	symref-verify refs/heads/symref refs/heads/main
+	symref-delete refs/heads/symrefd refs/heads/main
+	symref-create refs/heads/symrefc refs/heads/main
+	symref-update refs/heads/symrefu refs/heads/branch ref refs/heads/main
+	prepare
+	commit
+	EOF
+	test_cmp expect actual
 '
 
 test_done

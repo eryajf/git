@@ -1,14 +1,15 @@
 /*
-Copyright 2020 Google LLC
-
-Use of this source code is governed by a BSD-style
-license that can be found in the LICENSE file or at
-https://developers.google.com/open-source/licenses/bsd
-*/
+ * Copyright 2020 Google LLC
+ *
+ * Use of this source code is governed by a BSD-style
+ * license that can be found in the LICENSE file or at
+ * https://developers.google.com/open-source/licenses/bsd
+ */
 
 #ifndef REFTABLE_STACK_H
 #define REFTABLE_STACK_H
 
+#include "reftable-system.h"
 #include "reftable-writer.h"
 
 /*
@@ -25,11 +26,31 @@ https://developers.google.com/open-source/licenses/bsd
  */
 struct reftable_stack;
 
+/* Options related to opening a stack. */
+struct reftable_stack_options {
+	/*
+	 * 4-byte identifier ("sha1", "s256") of the hash. Defaults to SHA1 if
+	 * unset.
+	 */
+	enum reftable_hash hash_id;
+
+	/*
+	 * Callback function to execute whenever the stack is being reloaded.
+	 * This can be used e.g. to discard cached information that relies on
+	 * the old stack's data. The payload data will be passed as argument to
+	 * the callback.
+	 */
+	void (*on_reload)(void *payload);
+	void *on_reload_payload;
+
+	int suppress_deletions;
+};
+
 /* open a new reftable stack. The tables along with the table list will be
  *  stored in 'dir'. Typically, this should be .git/reftables.
  */
 int reftable_new_stack(struct reftable_stack **dest, const char *dir,
-		       struct reftable_write_options config);
+		       const struct reftable_stack_options *opts);
 
 /* returns the update_index at which a next table should be written. */
 uint64_t reftable_stack_next_update_index(struct reftable_stack *st);
@@ -41,8 +62,9 @@ struct reftable_addition;
  * returns a new transaction to add reftables to the given stack. As a side
  * effect, the ref database is locked.
  */
-int reftable_stack_new_addition(struct reftable_addition **dest,
-				struct reftable_stack *st);
+int reftable_stack_addition_new(struct reftable_addition **dest,
+				struct reftable_stack *st,
+				const struct reftable_write_options *opts);
 
 /* Adds a reftable to transaction. */
 int reftable_addition_add(struct reftable_addition *add,
@@ -59,12 +81,33 @@ int reftable_addition_commit(struct reftable_addition *add);
  * transaction. Releases the lock if held. */
 void reftable_addition_destroy(struct reftable_addition *add);
 
-/* add a new table to the stack. The write_table function must call
- * reftable_writer_set_limits, add refs and return an error value. */
+/*
+ * Add a new table to the stack. The write_table function must call
+ * reftable_writer_set_limits, add refs and return an error value.
+ */
 int reftable_stack_add(struct reftable_stack *st,
 		       int (*write_table)(struct reftable_writer *wr,
 					  void *write_arg),
-		       void *write_arg);
+		       void *write_arg,
+		       const struct reftable_write_options *opts);
+
+struct reftable_iterator;
+
+/*
+ * Initialize an iterator for the merged tables contained in the stack that can
+ * be used to iterate through refs. The iterator is valid until the next reload
+ * or write.
+ */
+int reftable_stack_init_ref_iterator(struct reftable_stack *st,
+				     struct reftable_iterator *it);
+
+/*
+ * Initialize an iterator for the merged tables contained in the stack that can
+ * be used to iterate through logs. The iterator is valid until the next reload
+ * or write.
+ */
+int reftable_stack_init_log_iterator(struct reftable_stack *st,
+				     struct reftable_iterator *it);
 
 /* returns the merged_table for seeking. This table is valid until the
  * next write or reload, and should not be closed or deleted.
@@ -91,10 +134,24 @@ struct reftable_log_expiry_config {
 /* compacts all reftables into a giant table. Expire reflog entries if config is
  * non-NULL */
 int reftable_stack_compact_all(struct reftable_stack *st,
+			       const struct reftable_write_options *opts,
 			       struct reftable_log_expiry_config *config);
 
+/*
+ * Check if compaction is required.
+ *
+ * When `use_heuristics` is false, check if all tables can be compacted to a
+ * single table. If true, use heuristics to determine if the tables need to be
+ * compacted to maintain geometric progression.
+ */
+int reftable_stack_compaction_required(struct reftable_stack *st,
+				       const struct reftable_write_options *opts,
+				       bool use_heuristics,
+				       bool *required);
+
 /* heuristically compact unbalanced table stack. */
-int reftable_stack_auto_compact(struct reftable_stack *st);
+int reftable_stack_auto_compact(struct reftable_stack *st,
+				const struct reftable_write_options *opts);
 
 /* delete stale .ref tables. */
 int reftable_stack_clean(struct reftable_stack *st);
@@ -122,7 +179,7 @@ struct reftable_compaction_stats {
 struct reftable_compaction_stats *
 reftable_stack_compaction_stats(struct reftable_stack *st);
 
-/* print the entire stack represented by the directory */
-int reftable_stack_print_directory(const char *stackdir, uint32_t hash_id);
+/* Return the hash of the stack. */
+enum reftable_hash reftable_stack_hash_id(struct reftable_stack *st);
 
 #endif

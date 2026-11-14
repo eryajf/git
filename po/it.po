@@ -5400,7 +5400,7 @@ msgstr "uso: %s"
 #: parse-options.c:915
 #, c-format
 msgid "   or: %s"
-msgstr "  oppure: %s"
+msgstr "  o: %s"
 
 #: parse-options.c:918
 #, c-format
@@ -17602,7 +17602,7 @@ msgstr "Controllo la ridenominazione di '%s' in '%s'\n"
 
 #: builtin/mv.c:185
 msgid "bad source"
-msgstr "sourgente errata"
+msgstr "sorgente errata"
 
 #: builtin/mv.c:188
 msgid "can not move directory into itself"

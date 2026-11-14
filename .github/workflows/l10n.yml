@@ -2,6 +2,12 @@ name: git-l10n
 
 on: [push, pull_request_target]
 
+# Avoid unnecessary builds. Unlike the main CI jobs, these are not
+# ci-configurable (but could be).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   git-po-helper:
     if: >-
@@ -23,8 +29,8 @@ jobs:
             base=${{ github.event.before }}
             head=${{ github.event.after }}
           fi
-          echo "::set-output name=base::$base"
-          echo "::set-output name=head::$head"
+          echo base=$base >>$GITHUB_OUTPUT
+          echo head=$head >>$GITHUB_OUTPUT
       - name: Run partial clone
         run: |
           git -c init.defaultBranch=master init --bare .
@@ -57,9 +63,10 @@ jobs:
             origin \
             ${{ github.ref }} \
             $args
-      - uses: actions/setup-go@v2
+      - uses: actions/setup-go@v6
         with:
           go-version: '>=1.16'
+          cache: false
       - name: Install git-po-helper
         run: go install github.com/git-l10n/git-po-helper@main
       - name: Install other dependencies
@@ -85,14 +92,13 @@ jobs:
           cat git-po-helper.out
           exit $exit_code
       - name: Create comment in pull request for report
-        uses: mshick/add-pr-comment@v1
+        uses: mshick/add-pr-comment@v3
         if: >-
           always() &&
           github.event_name == 'pull_request_target' &&
           env.COMMENT_BODY != ''
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-          repo-token-user-login: 'github-actions[bot]'
           message: >
             ${{ steps.check-commits.outcome == 'failure' && 'Errors and warnings' || 'Warnings' }}
             found by [git-po-helper](https://github.com/git-l10n/git-po-helper#readme) in workflow

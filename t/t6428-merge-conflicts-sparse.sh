@@ -23,13 +23,11 @@ test_description="merge cases"
 #                     files that might be renamed into each other's paths.)
 
 . ./test-lib.sh
-. "$TEST_DIRECTORY"/lib-merge.sh
-
 
 # Testcase basic, conflicting changes in 'numerals'
 
 test_setup_numerals () {
-	test_create_repo numerals_$1 &&
+	git init numerals_$1 &&
 	(
 		cd numerals_$1 &&
 

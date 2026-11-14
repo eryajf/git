@@ -4,7 +4,6 @@
 
 test_description='git svn honors i18n.commitEncoding in config'
 
-TEST_FAILS_SANITIZE_LEAK=true
 . ./lib-git-svn.sh
 
 compare_git_head_with () {
@@ -72,7 +71,7 @@ do
 	'
 done
 
-test_expect_success UTF8 'ISO-8859-1 should match UTF-8 in svn' '
+test_expect_success UTF8,!MINGW 'ISO-8859-1 should match UTF-8 in svn' '
 	(
 		cd ISO8859-1 &&
 		compare_svn_head_with "$TEST_DIRECTORY"/t3900/1-UTF-8.txt
@@ -81,7 +80,7 @@ test_expect_success UTF8 'ISO-8859-1 should match UTF-8 in svn' '
 
 for H in eucJP ISO-2022-JP
 do
-	test_expect_success UTF8 "$H should match UTF-8 in svn" '
+	test_expect_success UTF8,!MINGW "$H should match UTF-8 in svn" '
 		(
 			cd $H &&
 			compare_svn_head_with "$TEST_DIRECTORY"/t3900/2-UTF-8.txt

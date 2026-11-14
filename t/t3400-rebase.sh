@@ -143,8 +143,10 @@ test_expect_success 'Show verbose error when HEAD could not be detached' '
 	>B &&
 	test_when_finished "rm -f B" &&
 	test_must_fail git rebase topic 2>output.err >output.out &&
-	test_i18ngrep "The following untracked working tree files would be overwritten by checkout:" output.err &&
-	test_i18ngrep B output.err
+	test_grep "The following untracked working tree files would be overwritten by checkout:" output.err &&
+	test_grep B output.err &&
+	test_must_fail git rebase --quit 2>err &&
+	test_grep "no rebase in progress" err
 '
 
 test_expect_success 'fail when upstream arg is missing and not on branch' '
@@ -234,6 +236,12 @@ test_expect_success 'rebase --merge -q is quiet' '
 	test_must_be_empty output.out
 '
 
+test_expect_success 'rebase --exec -q is quiet' '
+	git checkout -B quiet topic &&
+	git rebase --exec true -q main >output.out 2>&1 &&
+	test_must_be_empty output.out
+'
+
 test_expect_success 'Rebase a commit that sprinkles CRs in' '
 	(
 		echo "One" &&
@@ -262,10 +270,22 @@ test_expect_success 'rebase can copy notes' '
 	test "a note" = "$(git notes show HEAD)"
 '
 
-test_expect_success 'rebase -m can copy notes' '
+test_expect_success 'rebase --apply can copy notes' '
 	git reset --hard n3 &&
-	git rebase -m --onto n1 n2 &&
+	git rebase --apply --onto n1 n2 &&
 	test "a note" = "$(git notes show HEAD)"
+'
+
+test_expect_success 'rebase drops notes of dropped commits' '
+	git checkout n1 &&
+	echo n3 >n3.t &&
+	echo n4 >n4.t &&
+	git add n3.t n4.t &&
+	git commit -m n34 &&
+	git rebase HEAD n3 &&
+	test_commit_message HEAD -m n2 &&
+	test_must_fail git notes list HEAD >actual &&
+	test_must_be_empty actual
 '
 
 test_expect_success 'rebase commit with an ancient timestamp' '
@@ -279,16 +299,16 @@ test_expect_success 'rebase commit with an ancient timestamp' '
 	git commit --date="@34567 +0600" -m "Old three" &&
 
 	git cat-file commit HEAD^^ >actual &&
-	grep "author .* 12345 +0400$" actual &&
+	test_grep "author .* 12345 +0400$" actual &&
 	git cat-file commit HEAD^ >actual &&
-	grep "author .* 23456 +0500$" actual &&
+	test_grep "author .* 23456 +0500$" actual &&
 	git cat-file commit HEAD >actual &&
-	grep "author .* 34567 +0600$" actual &&
+	test_grep "author .* 34567 +0600$" actual &&
 
 	git rebase --onto HEAD^^ HEAD^ &&
 
 	git cat-file commit HEAD >actual &&
-	grep "author .* 34567 +0600$" actual
+	test_grep "author .* 34567 +0600$" actual
 '
 
 test_expect_success 'rebase with "From " line in commit message' '
@@ -325,7 +345,7 @@ test_expect_success 'rebase --apply and --show-current-patch' '
 		git tag two &&
 		test_must_fail git rebase --apply -f --onto init HEAD^ &&
 		GIT_TRACE=1 git rebase --show-current-patch >/dev/null 2>stderr &&
-		grep "show.*$(git rev-parse two)" stderr
+		test_grep "show.*$(git rev-parse two)" stderr
 	)
 '
 
@@ -356,12 +376,12 @@ test_expect_success 'rebase --apply and .gitattributes' '
 
 		git checkout test &&
 		git rebase main &&
-		grep "smudged" a.txt &&
+		test_grep "smudged" a.txt &&
 
 		git checkout removal &&
 		git reset --hard &&
 		git rebase main &&
-		grep "clean" a.txt
+		test_grep "clean" a.txt
 	)
 '
 
@@ -378,7 +398,7 @@ test_expect_success 'rebase--merge.sh and --show-current-patch' '
 		test_must_fail git rebase --merge --onto init HEAD^ &&
 		git rebase --show-current-patch >actual.patch &&
 		GIT_TRACE=1 git rebase --show-current-patch >/dev/null 2>stderr &&
-		grep "show.*REBASE_HEAD" stderr &&
+		test_grep "show.*REBASE_HEAD" stderr &&
 		test "$(git rev-parse REBASE_HEAD)" = "$(git rev-parse two)"
 	)
 '
@@ -386,6 +406,20 @@ test_expect_success 'rebase--merge.sh and --show-current-patch' '
 test_expect_success 'switch to branch checked out here' '
 	git checkout main &&
 	git rebase main main
+'
+
+test_expect_success 'switch to branch checked out elsewhere fails' '
+	test_when_finished "
+		git worktree remove wt1 &&
+		git worktree remove wt2 &&
+		git branch -d shared
+	" &&
+	git worktree add wt1 -b shared &&
+	git worktree add wt2 -f shared &&
+	# we test in both worktrees to ensure that works
+	# as expected with "first" and "next" worktrees
+	test_must_fail git -C wt1 rebase shared shared &&
+	test_must_fail git -C wt2 rebase shared shared
 '
 
 test_expect_success 'switch to branch not checked out' '
@@ -407,17 +441,9 @@ test_expect_success 'refuse to switch to branch checked out elsewhere' '
 	git checkout main &&
 	git worktree add wt &&
 	test_must_fail git -C wt rebase main main 2>err &&
-	test_i18ngrep "already checked out" err
-'
-
-test_expect_success MINGW,SYMLINKS_WINDOWS 'rebase when .git/logs is a symlink' '
-	git checkout main &&
-	mv .git/logs actual_logs &&
-	cmd //c "mklink /D .git\logs ..\actual_logs" &&
-	git rebase -f HEAD^ &&
-	test -L .git/logs &&
-	rm .git/logs &&
-	mv actual_logs .git/logs
+	test_grep "already used by worktree at" err &&
+	test_must_fail git -C wt rebase --quit 2>err &&
+	test_grep "no rebase in progress" err
 '
 
 test_expect_success 'rebase when inside worktree subdirectory' '
@@ -439,6 +465,44 @@ test_expect_success 'rebase when inside worktree subdirectory' '
 		# now do the rebase
 		git rebase --onto HEAD^^ HEAD^  # drops the HEAD^ commit
 	)
+'
+
+test_expect_success 'git rebase --update-ref with core.commentChar and branch on worktree' '
+	test_when_finished git branch -D base topic2 &&
+	test_when_finished git checkout main &&
+	test_when_finished git branch -D wt-topic &&
+	test_when_finished git worktree remove wt-topic &&
+	git checkout main &&
+	git checkout -b base &&
+	git checkout -b topic2 &&
+	test_commit msg2 &&
+	git worktree add wt-topic &&
+	git checkout base &&
+	test_commit msg3 &&
+	git checkout topic2 &&
+	GIT_SEQUENCE_EDITOR="cat >actual" git -c core.commentChar=% \
+		 rebase -i --update-refs base &&
+	test_grep "% Ref refs/heads/wt-topic checked out at" actual &&
+	test_grep ! "Ref refs/heads/topic2" actual
+'
+
+test_expect_success 'git rebase --update-refs ignores current branch with branches on worktrees' '
+	test_when_finished git branch -D base current a-topic z-topic &&
+	test_when_finished git checkout main &&
+	test_when_finished git worktree remove z-topic &&
+	test_when_finished git worktree remove a-topic &&
+	git checkout -b base main &&
+	git checkout -b current &&
+	test_commit msg4 &&
+	git worktree add a-topic &&
+	git worktree add z-topic &&
+	git checkout base &&
+	test_commit msg5 &&
+	git checkout current &&
+	GIT_SEQUENCE_EDITOR="cat >actual" git rebase -i --update-refs base &&
+	test_grep "# Ref refs/heads/a-topic checked out at" actual &&
+	test_grep "# Ref refs/heads/z-topic checked out at" actual &&
+	test_grep ! "refs/heads/current" actual
 '
 
 test_done

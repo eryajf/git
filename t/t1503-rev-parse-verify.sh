@@ -9,7 +9,6 @@ exec </dev/null
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 add_line_into_file()
@@ -63,15 +62,15 @@ test_expect_success 'works with one good rev' '
 
 test_expect_success 'fails with any bad rev or many good revs' '
 	test_must_fail git rev-parse --verify 2>error &&
-	grep "single revision" error &&
+	test_grep "single revision" error &&
 	test_must_fail git rev-parse --verify foo 2>error &&
-	grep "single revision" error &&
+	test_grep "single revision" error &&
 	test_must_fail git rev-parse --verify HEAD bar 2>error &&
-	grep "single revision" error &&
+	test_grep "single revision" error &&
 	test_must_fail git rev-parse --verify baz HEAD 2>error &&
-	grep "single revision" error &&
+	test_grep "single revision" error &&
 	test_must_fail git rev-parse --verify $HASH2 HEAD 2>error &&
-	grep "single revision" error
+	test_grep "single revision" error
 '
 
 test_expect_success 'fails silently when using -q' '
@@ -132,7 +131,7 @@ test_expect_success 'use --default' '
 	test_must_fail git rev-parse --verify --default bar
 '
 
-test_expect_success !SANITIZE_LEAK 'main@{n} for various n' '
+test_expect_success 'main@{n} for various n' '
 	git reflog >out &&
 	N=$(wc -l <out) &&
 	Nm1=$(($N-1)) &&
@@ -142,11 +141,6 @@ test_expect_success !SANITIZE_LEAK 'main@{n} for various n' '
 	git rev-parse --verify main@{$Nm1} &&
 	test_must_fail git rev-parse --verify main@{$N} &&
 	test_must_fail git rev-parse --verify main@{$Np1}
-'
-
-test_expect_success SYMLINKS,REFFILES 'ref resolution not confused by broken symlinks' '
-	ln -s does-not-exist .git/refs/heads/broken &&
-	test_must_fail git rev-parse --verify broken
 '
 
 test_expect_success 'options can appear after --verify' '

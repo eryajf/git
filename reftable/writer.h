@@ -1,10 +1,10 @@
 /*
-Copyright 2020 Google LLC
-
-Use of this source code is governed by a BSD-style
-license that can be found in the LICENSE file or at
-https://developers.google.com/open-source/licenses/bsd
-*/
+ * Copyright 2020 Google LLC
+ *
+ * Use of this source code is governed by a BSD-style
+ * license that can be found in the LICENSE file or at
+ * https://developers.google.com/open-source/licenses/bsd
+ */
 
 #ifndef WRITER_H
 #define WRITER_H
@@ -16,14 +16,18 @@ https://developers.google.com/open-source/licenses/bsd
 
 struct reftable_writer {
 	ssize_t (*write)(void *, const void *, size_t);
+	int (*flush)(void *);
 	void *write_arg;
 	int pending_padding;
-	struct strbuf last_key;
+	struct reftable_buf last_key;
+	/* Scratch buffer used to avoid allocations. */
+	struct reftable_buf scratch;
 
 	/* offset of next block to write. */
 	uint64_t next;
 	uint64_t min_update_index, max_update_index;
 	struct reftable_write_options opts;
+	enum reftable_hash hash_id;
 
 	/* memory buffer for writing */
 	uint8_t *block;

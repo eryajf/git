@@ -3,10 +3,13 @@
  *
  * Copyright (C) Linus Torvalds, 2005
  */
-#include "git-compat-util.h"
-#include "cache.h"
 
-static void vreportf(const char *prefix, const char *err, va_list params)
+#include "git-compat-util.h"
+#include "gettext.h"
+#include "trace2.h"
+#include "strbuf.h"
+
+static void vfreportf(FILE *f, const char *prefix, const char *err, va_list params)
 {
 	char msg[4096];
 	char *p, *pend = msg + sizeof(msg);
@@ -18,8 +21,11 @@ static void vreportf(const char *prefix, const char *err, va_list params)
 	}
 	memcpy(msg, prefix, prefix_len);
 	p = msg + prefix_len;
-	if (vsnprintf(p, pend - p, err, params) < 0)
+	if (vsnprintf(p, pend - p, err, params) < 0) {
+		fprintf(stderr, _("error: unable to format message: %s\n"),
+			err);
 		*p = '\0'; /* vsnprintf() failed, clip at prefix */
+	}
 
 	for (; p != pend - 1 && *p; p++) {
 		if (iscntrl(*p) && *p != '\t' && *p != '\n')
@@ -27,8 +33,13 @@ static void vreportf(const char *prefix, const char *err, va_list params)
 	}
 
 	*(p++) = '\n'; /* we no longer need a NUL */
-	fflush(stderr);
-	write_in_full(2, msg, p - msg);
+	fflush(f);
+	write_in_full(fileno(f), msg, p - msg);
+}
+
+static void vreportf(const char *prefix, const char *err, va_list params)
+{
+	vfreportf(stderr, prefix, err, params);
 }
 
 static NORETURN void usage_builtin(const char *err, va_list params)
@@ -57,6 +68,8 @@ static NORETURN void usage_builtin(const char *err, va_list params)
 
 static void die_message_builtin(const char *err, va_list params)
 {
+	if (!err)
+		return;
 	trace2_cmd_error_va(err, params);
 	vreportf(_("fatal: "), err, params);
 }
@@ -168,6 +181,23 @@ void NORETURN usage(const char *err)
 	usagef("%s", err);
 }
 
+static void show_usage_if_asked_helper(const char *err, ...)
+{
+	va_list params;
+
+	va_start(params, err);
+	vfreportf(stdout, _("usage: "), err, params);
+	va_end(params);
+	exit(0);
+}
+
+void show_usage_if_asked(int ac, const char **av, const char *err)
+{
+	if (ac == 2 && (!strcmp(av[1], "-h") ||
+			!strcmp(av[1], "--help-all")))
+		show_usage_if_asked_helper(err);
+}
+
 void NORETURN die(const char *err, ...)
 {
 	va_list params;
@@ -185,7 +215,7 @@ void NORETURN die(const char *err, ...)
 static const char *fmt_with_err(char *buf, int n, const char *fmt)
 {
 	char str_error[256], *err;
-	int i, j;
+	size_t i, j;
 
 	err = strerror(errno);
 	for (i = j = 0; err[i] && j < sizeof(str_error) - 1; ) {
@@ -347,17 +377,30 @@ void bug_fl(const char *file, int line, const char *fmt, ...)
 	va_end(ap);
 }
 
-#ifdef SUPPRESS_ANNOTATED_LEAKS
-void unleak_memory(const void *ptr, size_t len)
-{
-	static struct suppressed_leak_root {
-		struct suppressed_leak_root *next;
-		char data[FLEX_ARRAY];
-	} *suppressed_leaks;
-	struct suppressed_leak_root *root;
 
-	FLEX_ALLOC_MEM(root, data, ptr, len);
-	root->next = suppressed_leaks;
-	suppressed_leaks = root;
+NORETURN void you_still_use_that(const char *command_name, const char *hint)
+{
+	struct strbuf percent_encoded = STRBUF_INIT;
+	strbuf_add_percentencode(&percent_encoded,
+				 command_name,
+				 STRBUF_ENCODE_SLASH);
+
+	fprintf(stderr,
+		_("'%s' will be removed soon.\n"), command_name);
+
+	if (hint)
+		fputs(hint, stderr);
+
+	fprintf(stderr,
+		_("If you need a replacement:\n"
+		  "\n"
+		  "- Read https://git-scm.com/docs/BreakingChanges.html.\n\n"
+		  "- Check what others on the mailing list suggest as a replacement:\n"
+		  "  https://lore.kernel.org/git/?q=%s\n\n"
+		  "- Send an email to <git@vger.kernel.org> asking for help, only if\n"
+		  "  suggestions by others do not work for you.\n"
+		  "\n"),
+		percent_encoded.buf);
+	strbuf_release(&percent_encoded);
+	die(_("refusing to run without --i-still-use-this"));
 }
-#endif

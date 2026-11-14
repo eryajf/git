@@ -1,14 +1,17 @@
 #ifndef HTTP_H
 #define HTTP_H
 
-#include "cache.h"
+struct packed_git;
+struct packfile_list;
+
+#include "git-zlib.h"
 
 #include <curl/curl.h>
 #include <curl/easy.h>
 
+#include "gettext.h"
 #include "strbuf.h"
 #include "remote.h"
-#include "url.h"
 
 #define DEFAULT_MAX_REQUESTS 5
 
@@ -17,6 +20,7 @@ struct slot_results {
 	long http_code;
 	long auth_avail;
 	long http_connectcode;
+	long retry_after;
 };
 
 struct active_request_slot {
@@ -40,7 +44,7 @@ struct buffer {
 size_t fread_buffer(char *ptr, size_t eltsize, size_t nmemb, void *strbuf);
 size_t fwrite_buffer(char *ptr, size_t eltsize, size_t nmemb, void *strbuf);
 size_t fwrite_null(char *ptr, size_t eltsize, size_t nmemb, void *strbuf);
-curlioerr ioctl_buffer(CURL *handle, int cmd, void *clientp);
+int seek_buffer(void *clientp, curl_off_t offset, int origin);
 
 /* Slot lifecycle functions */
 struct active_request_slot *get_active_slot(void);
@@ -72,6 +76,12 @@ extern int http_is_verbose;
 extern ssize_t http_post_buffer;
 extern struct credential http_auth;
 
+/**
+ * Prepare for an HTTP re-authentication retry. This fills credentials
+ * via credential_fill() so the next request can include them.
+ */
+void http_reauth_prepare(int all_capabilities);
+
 extern char curl_errorstr[CURL_ERROR_SIZE];
 
 enum http_follow_config {
@@ -93,6 +103,15 @@ static inline int missing__target(int code, int result)
 }
 
 #define missing_target(a) missing__target((a)->http_code, (a)->curl_result)
+
+static inline curl_off_t cast_size_t_to_curl_off_t(size_t a)
+{
+	uintmax_t size = a;
+	if (size > maximum_signed_value_of_type(curl_off_t))
+		die(_("number too large to represent as curl_off_t "
+		      "on this platform: %"PRIuMAX), (uintmax_t)a);
+	return (curl_off_t)a;
+}
 
 /*
  * Normalize curl results to handle CURL_FAILONERROR (or lack thereof). Failing
@@ -145,6 +164,13 @@ struct http_get_options {
 	 * request has completed.
 	 */
 	struct string_list *extra_headers;
+
+	/*
+	 * After a request completes, contains the Retry-After delay in seconds
+	 * if the server returned HTTP 429 with a Retry-After header (requires
+	 * libcurl 7.66.0 or later), or -1 if no such header was present.
+	 */
+	long retry_after;
 };
 
 /* Return values for http_get_*() */
@@ -155,6 +181,7 @@ struct http_get_options {
 #define HTTP_REAUTH	4
 #define HTTP_NOAUTH	5
 #define HTTP_NOMATCHPUBLICKEY	6
+#define HTTP_RATE_LIMITED	7
 
 /*
  * Requests a URL and stores the result in a strbuf.
@@ -174,9 +201,12 @@ int http_get_file(const char *url, const char *filename,
 
 int http_fetch_ref(const char *base, struct ref *ref);
 
+struct curl_slist *http_append_auth_header(const struct credential *c,
+					   struct curl_slist *headers);
+
 /* Helpers for fetching packs */
 int http_get_info_packs(const char *base_url,
-			struct packed_git **packs_head);
+			struct packfile_list *packs);
 
 /* Helper for getting Accept-Language header */
 const char *http_get_accept_language_header(void);
@@ -195,6 +225,7 @@ struct http_pack_request {
 	FILE *packfile;
 	struct strbuf tmpfile;
 	struct active_request_slot *slot;
+	struct curl_slist *headers;
 };
 
 struct http_pack_request *new_http_pack_request(
@@ -205,13 +236,13 @@ int finish_http_pack_request(struct http_pack_request *preq);
 void release_http_pack_request(struct http_pack_request *preq);
 
 /*
- * Remove p from the given list, and invoke install_packed_git() on it.
+ * Remove p from the given list, and invoke packfile_store_add_pack() on it.
  *
  * This is a convenience function for users that have obtained a list of packs
  * from http_get_info_packs() and have chosen a specific pack to fetch.
  */
 void http_install_packfile(struct packed_git *p,
-			   struct packed_git **list_to_remove_from);
+			   struct packfile_list *list_to_remove_from);
 
 /* Helpers for fetching object */
 struct http_object_request {
@@ -223,19 +254,20 @@ struct http_object_request {
 	long http_code;
 	struct object_id oid;
 	struct object_id real_oid;
-	git_hash_ctx c;
+	struct git_hash_ctx c;
 	git_zstream stream;
 	int zret;
 	int rename;
 	struct active_request_slot *slot;
+	struct curl_slist *headers;
 };
 
 struct http_object_request *new_http_object_request(
 	const char *base_url, const struct object_id *oid);
 void process_http_object_request(struct http_object_request *freq);
 int finish_http_object_request(struct http_object_request *freq);
-void abort_http_object_request(struct http_object_request *freq);
-void release_http_object_request(struct http_object_request *freq);
+void abort_http_object_request(struct http_object_request **freq);
+void release_http_object_request(struct http_object_request **freq);
 
 /*
  * Instead of using environment variables to determine if curl tracing happens,

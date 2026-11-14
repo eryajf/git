@@ -2,12 +2,16 @@
  * Copyright (C) 2005 Junio C Hamano
  * Copyright (C) 2010 Google Inc.
  */
-#include "cache.h"
+
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
 #include "diff.h"
 #include "diffcore.h"
 #include "xdiff-interface.h"
 #include "kwset.h"
-#include "commit.h"
+#include "oidset.h"
+#include "pretty.h"
 #include "quote.h"
 
 typedef int (*pickaxe_fn)(mmfile_t *one, mmfile_t *two,
@@ -38,7 +42,7 @@ static int diffgrep_consume(void *priv, char *line, unsigned long len)
 
 static int diff_grep(mmfile_t *one, mmfile_t *two,
 		     struct diff_options *o,
-		     regex_t *regexp, kwset_t kws)
+		     regex_t *regexp, kwset_t kws UNUSED)
 {
 	struct diffgrep_cb ecbdata;
 	xpparam_t xpp;
@@ -114,7 +118,7 @@ static unsigned int contains(mmfile_t *mf, regex_t *regexp, kwset_t kws,
 }
 
 static int has_changes(mmfile_t *one, mmfile_t *two,
-		       struct diff_options *o,
+		       struct diff_options *o UNUSED,
 		       regex_t *regexp, kwset_t kws)
 {
 	unsigned int c1 = one ? contains(one, regexp, kws, 0) : 0;
@@ -181,9 +185,7 @@ static void pickaxe(struct diff_queue_struct *q, struct diff_options *o,
 		    regex_t *regexp, kwset_t kws, pickaxe_fn fn)
 {
 	int i;
-	struct diff_queue_struct outq;
-
-	DIFF_QUEUE_CLEAR(&outq);
+	struct diff_queue_struct outq = DIFF_QUEUE_INIT;
 
 	if (o->pickaxe_opts & DIFF_PICKAXE_ALL) {
 		/* Showing the whole changeset if needle exists */
@@ -201,7 +203,7 @@ static void pickaxe(struct diff_queue_struct *q, struct diff_options *o,
 		for (i = 0; i < q->nr; i++)
 			diff_free_filepair(q->queue[i]);
 	} else {
-		/* Showing only the filepairs that has the needle */
+		/* Showing only the filepairs that have the needle */
 		for (i = 0; i < q->nr; i++) {
 			struct diff_filepair *p = q->queue[i];
 			if (pickaxe_match(p, o, regexp, kws, fn))

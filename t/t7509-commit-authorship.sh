@@ -5,17 +5,11 @@
 
 test_description='commit tests of various authorhip options. '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 author_header () {
 	git cat-file commit "$1" |
 	sed -n -e '/^$/q' -e '/^author /p'
-}
-
-message_body () {
-	git cat-file commit "$1" |
-	sed -e '1,/^$/d'
 }
 
 test_expect_success '-C option copies authorship and message' '
@@ -28,8 +22,8 @@ test_expect_success '-C option copies authorship and message' '
 	author_header HEAD >actual &&
 	test_cmp expect actual &&
 
-	message_body Initial >expect &&
-	message_body HEAD >actual &&
+	commit_body Initial >expect &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -41,8 +35,8 @@ test_expect_success '-C option copies only the message with --reset-author' '
 	author_header HEAD >actual &&
 	test_cmp expect actual &&
 
-	message_body Initial >expect &&
-	message_body HEAD >actual &&
+	commit_body Initial >expect &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -63,8 +57,8 @@ test_expect_success '-c option copies only the message with --reset-author' '
 	author_header HEAD >actual &&
 	test_cmp expect actual &&
 
-	message_body Initial >expect &&
-	message_body HEAD >actual &&
+	commit_body Initial >expect &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -78,7 +72,7 @@ test_expect_success '--amend option copies authorship' '
 	test_cmp expect actual &&
 
 	echo "amend test" >expect &&
-	message_body HEAD >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -99,20 +93,20 @@ test_expect_success '--amend option with empty author' '
 	echo "Empty author test" >>foo &&
 	test_tick &&
 	test_must_fail git commit -a -m "empty author" --amend 2>err &&
-	test_i18ngrep "empty ident" err
+	test_grep "empty ident" err
 '
 
 test_expect_success '--amend option with missing author' '
 	git cat-file commit Initial >tmp &&
 	sed "s/author [^<]* </author </" tmp >malformed &&
-	sha=$(git hash-object -t commit -w malformed) &&
+	sha=$(git hash-object --literally -t commit -w malformed) &&
 	test_when_finished "remove_object $sha" &&
 	git checkout $sha &&
 	test_when_finished "git checkout Initial" &&
 	echo "Missing author test" >>foo &&
 	test_tick &&
 	test_must_fail git commit -a -m "malformed author" --amend 2>err &&
-	test_i18ngrep "empty ident" err
+	test_grep "empty ident" err
 '
 
 test_expect_success '--reset-author makes the commit ours even with --amend option' '
@@ -125,7 +119,7 @@ test_expect_success '--reset-author makes the commit ours even with --amend opti
 	test_cmp expect actual &&
 
 	echo "Changed again" >expect &&
-	message_body HEAD >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -158,7 +152,7 @@ test_expect_success 'commit respects CHERRY_PICK_HEAD and MERGE_MSG' '
 	test_cmp expect actual &&
 
 	echo "This is a MERGE_MSG" >expect &&
-	message_body HEAD >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 

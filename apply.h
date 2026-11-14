@@ -59,7 +59,8 @@ struct apply_state {
 	struct repository *repo;
 	const char *index_file;
 	enum apply_verbosity apply_verbosity;
-	const char *fake_ancestor;
+	int merge_variant;
+	char *fake_ancestor;
 	const char *patch_input_file;
 	int line_termination;
 	struct strbuf root;
@@ -166,6 +167,7 @@ int check_apply_state(struct apply_state *state, int force_apply);
  * Returns -1 on failure, the length of the parsed header otherwise.
  */
 int parse_git_diff_header(struct strbuf *root,
+			  const char *patch_input_file,
 			  int *linenr,
 			  int p_value,
 			  const char *line,

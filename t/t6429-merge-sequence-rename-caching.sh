@@ -11,14 +11,13 @@ test_description="remember regular & dir renames in sequence of merges"
 #         sure that we are triggering rename caching rather than rename
 #         bypassing.
 #
-# NOTE 2: this testfile uses 'test-tool fast-rebase' instead of either
-#         cherry-pick or rebase.  sequencer.c is only superficially
-#         integrated with merge-ort; it calls merge_switch_to_result()
-#         after EACH merge, which updates the index and working copy AND
-#         throws away the cached results (because merge_switch_to_result()
-#         is only supposed to be called at the end of the sequence).
-#         Integrating them more deeply is a big task, so for now the tests
-#         use 'test-tool fast-rebase'.
+# NOTE 2: this testfile uses replay instead of either cherry-pick or rebase.
+#         sequencer.c is only superficially integrated with merge-ort; it
+#         calls merge_switch_to_result() after EACH merge, which updates the
+#         index and working copy AND throws away the cached results (because
+#         merge_switch_to_result() is only supposed to be called at the end
+#         of the sequence).  Integrating them more deeply is a big task, so
+#         for now the tests use 'git replay'.
 #
 
 
@@ -35,7 +34,7 @@ test_description="remember regular & dir renames in sequence of merges"
 # preventing us from finding new renames.
 #
 test_expect_success 'caching renames does not preclude finding new ones' '
-	test_create_repo caching-renames-and-new-renames &&
+	git init caching-renames-and-new-renames &&
 	(
 		cd caching-renames-and-new-renames &&
 
@@ -71,8 +70,9 @@ test_expect_success 'caching renames does not preclude finding new ones' '
 
 		git switch upstream &&
 
-		test-tool fast-rebase --onto HEAD upstream~1 topic &&
-		#git cherry-pick upstream~1..topic
+		git replay --onto HEAD upstream~1..topic >out &&
+		git update-ref --stdin <out &&
+		git checkout topic &&
 
 		git ls-files >tracked-files &&
 		test_line_count = 2 tracked-files &&
@@ -106,7 +106,7 @@ test_expect_success 'caching renames does not preclude finding new ones' '
 # should be able to only run rename detection on the upstream side one
 # time.)
 test_expect_success 'cherry-pick both a commit and its immediate revert' '
-	test_create_repo pick-commit-and-its-immediate-revert &&
+	git init pick-commit-and-its-immediate-revert &&
 	(
 		cd pick-commit-and-its-immediate-revert &&
 
@@ -140,8 +140,9 @@ test_expect_success 'cherry-pick both a commit and its immediate revert' '
 		GIT_TRACE2_PERF="$(pwd)/trace.output" &&
 		export GIT_TRACE2_PERF &&
 
-		test-tool fast-rebase --onto HEAD upstream~1 topic &&
-		#git cherry-pick upstream~1..topic &&
+		git replay --onto HEAD upstream~1..topic >out &&
+		git update-ref --stdin <out &&
+		git checkout topic &&
 
 		grep region_enter.*diffcore_rename trace.output >calls &&
 		test_line_count = 1 calls
@@ -162,7 +163,7 @@ test_expect_success 'cherry-pick both a commit and its immediate revert' '
 # could cause a spurious rename/add conflict.
 #
 test_expect_success 'rename same file identically, then reintroduce it' '
-	test_create_repo rename-rename-1to1-then-add-old-filename &&
+	git init rename-rename-1to1-then-add-old-filename &&
 	(
 		cd rename-rename-1to1-then-add-old-filename &&
 
@@ -199,8 +200,9 @@ test_expect_success 'rename same file identically, then reintroduce it' '
 		GIT_TRACE2_PERF="$(pwd)/trace.output" &&
 		export GIT_TRACE2_PERF &&
 
-		test-tool fast-rebase --onto HEAD upstream~1 topic &&
-		#git cherry-pick upstream~1..topic &&
+		git replay --onto HEAD upstream~1..topic >out &&
+		git update-ref --stdin <out &&
+		git checkout topic &&
 
 		git ls-files >tracked &&
 		test_line_count = 2 tracked &&
@@ -229,7 +231,7 @@ test_expect_success 'rename same file identically, then reintroduce it' '
 # cached, the directory rename could put newfile in the wrong directory.
 #
 test_expect_success 'rename same file identically, then add file to old dir' '
-	test_create_repo rename-rename-1to1-then-add-file-to-old-dir &&
+	git init rename-rename-1to1-then-add-file-to-old-dir &&
 	(
 		cd rename-rename-1to1-then-add-file-to-old-dir &&
 
@@ -276,8 +278,9 @@ test_expect_success 'rename same file identically, then add file to old dir' '
 		GIT_TRACE2_PERF="$(pwd)/trace.output" &&
 		export GIT_TRACE2_PERF &&
 
-		test-tool fast-rebase --onto HEAD upstream~1 topic &&
-		#git cherry-pick upstream~1..topic &&
+		git replay --onto HEAD upstream~1..topic >out &&
+		git update-ref --stdin <out &&
+		git checkout topic &&
 
 		git ls-files >tracked &&
 		test_line_count = 4 tracked &&
@@ -311,7 +314,7 @@ test_expect_success 'rename same file identically, then add file to old dir' '
 # should avoid the need to re-detect upstream renames.)
 #
 test_expect_success 'cached dir rename does not prevent noticing later conflict' '
-	test_create_repo dir-rename-cache-not-occluding-later-conflict &&
+	git init dir-rename-cache-not-occluding-later-conflict &&
 	(
 		cd dir-rename-cache-not-occluding-later-conflict &&
 
@@ -353,10 +356,7 @@ test_expect_success 'cached dir rename does not prevent noticing later conflict'
 		GIT_TRACE2_PERF="$(pwd)/trace.output" &&
 		export GIT_TRACE2_PERF &&
 
-		test_must_fail test-tool fast-rebase --onto HEAD upstream~1 topic >output &&
-		#git cherry-pick upstream..topic &&
-
-		grep CONFLICT..rename/rename output &&
+		test_must_fail git replay --onto HEAD upstream~1..topic >output &&
 
 		grep region_enter.*diffcore_rename trace.output >calls &&
 		test_line_count = 2 calls
@@ -365,7 +365,7 @@ test_expect_success 'cached dir rename does not prevent noticing later conflict'
 
 # Helper for the next two tests
 test_setup_upstream_rename () {
-	test_create_repo $1 &&
+	git init $1 &&
 	(
 		cd $1 &&
 
@@ -455,8 +455,9 @@ test_expect_success 'dir rename unneeded, then add new file to old dir' '
 		GIT_TRACE2_PERF="$(pwd)/trace.output" &&
 		export GIT_TRACE2_PERF &&
 
-		test-tool fast-rebase --onto HEAD upstream~1 topic &&
-		#git cherry-pick upstream..topic &&
+		git replay --onto HEAD upstream~1..topic >out &&
+		git update-ref --stdin <out &&
+		git checkout topic &&
 
 		grep region_enter.*diffcore_rename trace.output >calls &&
 		test_line_count = 2 calls &&
@@ -521,8 +522,9 @@ test_expect_success 'dir rename unneeded, then rename existing file into old dir
 		GIT_TRACE2_PERF="$(pwd)/trace.output" &&
 		export GIT_TRACE2_PERF &&
 
-		test-tool fast-rebase --onto HEAD upstream~1 topic &&
-		#git cherry-pick upstream..topic &&
+		git replay --onto HEAD upstream~1..topic >out &&
+		git update-ref --stdin <out &&
+		git checkout topic &&
 
 		grep region_enter.*diffcore_rename trace.output >calls &&
 		test_line_count = 3 calls &&
@@ -537,7 +539,7 @@ test_expect_success 'dir rename unneeded, then rename existing file into old dir
 
 # Helper for the next two tests
 test_setup_topic_rename () {
-	test_create_repo $1 &&
+	git init $1 &&
 	(
 		cd $1 &&
 
@@ -623,8 +625,9 @@ test_expect_success 'caching renames only on upstream side, part 1' '
 		GIT_TRACE2_PERF="$(pwd)/trace.output" &&
 		export GIT_TRACE2_PERF &&
 
-		test-tool fast-rebase --onto HEAD upstream~1 topic &&
-		#git cherry-pick upstream..topic &&
+		git replay --onto HEAD upstream~1..topic >out &&
+		git update-ref --stdin <out &&
+		git checkout topic &&
 
 		grep region_enter.*diffcore_rename trace.output >calls &&
 		test_line_count = 1 calls &&
@@ -681,8 +684,9 @@ test_expect_success 'caching renames only on upstream side, part 2' '
 		GIT_TRACE2_PERF="$(pwd)/trace.output" &&
 		export GIT_TRACE2_PERF &&
 
-		test-tool fast-rebase --onto HEAD upstream~1 topic &&
-		#git cherry-pick upstream..topic &&
+		git replay --onto HEAD upstream~1..topic >out &&
+		git update-ref --stdin <out &&
+		git checkout topic &&
 
 		grep region_enter.*diffcore_rename trace.output >calls &&
 		test_line_count = 2 calls &&
@@ -725,7 +729,7 @@ test_expect_success 'avoid assuming we detected renames' '
 		mkdir unrelated &&
 		for i in $(test_seq 1 10)
 		do
-			>unrelated/$i
+			>unrelated/$i || exit 1
 		done &&
 		test_seq  2 10 >numbers &&
 		test_seq 12 20 >values &&
@@ -761,6 +765,144 @@ test_expect_success 'avoid assuming we detected renames' '
 
 		git ls-files -u >actual &&
 		test_line_count = 2 actual
+	)
+'
+
+#
+# In the following testcase:
+#   Base:     olddir/{valuesX_1, valuesY_1, valuesZ_1}
+#             other/content
+#   Upstream: rename olddir/valuesX_1 -> newdir/valuesX_2
+#   Topic_1:  modify olddir/valuesX_1 -> olddir/valuesX_3
+#   Topic_2:  modify olddir/valuesY,
+#             modify other/content
+#   Expected Pick1: olddir/{valuesY, valuesZ}, newdir/valuesX, other/content
+#   Expected Pick2: olddir/{valuesY, valuesZ}, newdir/valuesX, other/content
+#
+# This testcase presents no problems for git traditionally, but the fact that
+#    olddir/valuesX -> newdir/valuesX
+# gets cached after the first pick presents a problem for the second commit to
+# be replayed, because it appears to be an irrelevant rename, so the trivial
+# directory resolution will resolve newdir/ without recursing into it, giving
+# us no way to apply the cached rename to anything.
+#
+test_expect_success 'rename a file, use it on first pick, but irrelevant on second' '
+	git init rename_a_file_use_it_once_irrelevant_on_second &&
+	(
+		cd rename_a_file_use_it_once_irrelevant_on_second &&
+
+		mkdir olddir/ other/ &&
+		test_seq 3 8 >olddir/valuesX &&
+		test_seq 3 8 >olddir/valuesY &&
+		test_seq 3 8 >olddir/valuesZ &&
+		printf "%s\n" A B C D E F G >other/content &&
+		git add olddir other &&
+		git commit -m orig &&
+
+		git branch upstream &&
+		git branch topic &&
+
+		git switch upstream &&
+		test_seq 1 8 >olddir/valuesX &&
+		git add olddir &&
+		mkdir newdir &&
+		git mv olddir/valuesX newdir &&
+		git commit -m "Renamed (and modified) olddir/valuesX into newdir/" &&
+
+		git switch topic &&
+
+		test_seq 3 10 >olddir/valuesX &&
+		git add olddir &&
+		git commit -m A &&
+
+		test_seq 1 8 >olddir/valuesY &&
+		printf "%s\n" A B C D E F G H I >other/content &&
+		git add olddir/valuesY other &&
+		git commit -m B &&
+
+		#
+		# Actual testing; mostly we want to verify that we do not hit
+		#     git: merge-ort.c:3032: process_renames: Assertion `newinfo && !newinfo->merged.clean` failed.
+		#
+
+		git switch upstream &&
+		git config merge.directoryRenames true &&
+
+		git replay --onto HEAD upstream~1..topic >out &&
+
+		#
+		# ...but we may as well check that the replay gave us a reasonable result
+		#
+
+		git update-ref --stdin <out &&
+		git checkout topic &&
+
+		git ls-files >tracked &&
+		test_line_count = 4 tracked &&
+		test_path_is_file newdir/valuesX &&
+		test_path_is_file olddir/valuesY &&
+		test_path_is_file olddir/valuesZ &&
+		test_path_is_file other/content
+	)
+'
+
+#
+# In the following testcase:
+#   Base:     subdir/file_1
+#   Upstream: file_1         (renamed from subdir/file)
+#   Topic_1:  subdir/file_2  (modified subdir/file)
+#   Topic_2:  subdir/file_2, file_2  (added another "file" with same contents)
+#   Topic_3:  file_2         (deleted subdir/file)
+#
+#
+# This testcase presents no problems for git traditionally, but the fact that
+#    subdir/file -> file
+# gets cached after the first pick presents a problem for the third commit
+# to be replayed, because file has contents file_2 on all three sides and
+# is thus trivially resolved early.  The point of renames is to allow us to
+# three-way merge contents across multiple filenames, but if the target is
+# already resolved, we risk throwing an assertion.  Verify that the code
+# correctly drops the irrelevant rename in order to avoid hitting that
+# assertion.
+#
+test_expect_success 'cached rename does not assert on trivially clean target' '
+	git init cached-rename-trivially-clean-target &&
+	(
+		cd cached-rename-trivially-clean-target &&
+
+		mkdir subdir &&
+		printf "%s\n" 1 2 3 >subdir/file &&
+		git add subdir/file &&
+		git commit -m orig &&
+
+		git branch upstream &&
+		git branch topic &&
+
+		git switch upstream &&
+		git mv subdir/file file &&
+		git commit -m "rename subdir/file to file" &&
+
+		git switch topic &&
+
+		echo 4 >>subdir/file &&
+		git add subdir/file &&
+		git commit -m "modify subdir/file" &&
+
+		cp subdir/file file &&
+		git add file &&
+		git commit -m "copy subdir/file to file" &&
+
+		git rm subdir/file &&
+		git commit -m "delete subdir/file" &&
+
+		git switch upstream &&
+		git replay --onto HEAD upstream..topic &&
+		git checkout topic &&
+
+		git ls-files >tracked-files &&
+		test_line_count = 1 tracked-files &&
+		printf "%s\n" 1 2 3 4 >expect &&
+		test_cmp expect file
 	)
 '
 

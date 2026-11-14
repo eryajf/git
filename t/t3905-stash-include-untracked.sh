@@ -87,7 +87,6 @@ test_expect_success 'stash save --patch --all fails' '
 
 test_expect_success 'clean up untracked/untracked file to prepare for next tests' '
 	git clean --force --quiet
-
 '
 
 test_expect_success 'stash pop after save --include-untracked leaves files untracked again' '
@@ -404,7 +403,7 @@ test_expect_success 'stash show --include-untracked errors on duplicate files' '
 	) &&
 	w_commit=$(git commit-tree -p HEAD -p "$i_commit" -p "$u_commit" -m "WIP on any-branch" "$tree") &&
 	test_must_fail git stash show --include-untracked "$w_commit" 2>err &&
-	test_i18ngrep "worktree and untracked commit have duplicate entries: tracked" err
+	test_grep "worktree and untracked commit have duplicate entries: tracked" err
 '
 
 test_expect_success 'stash show --{include,only}-untracked on stashes without untracked entries' '

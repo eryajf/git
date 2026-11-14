@@ -1,6 +1,7 @@
 #!/bin/sh
 
 test_description='Test ref-filter and pretty APIs for commit and tag messages using CRLF'
+
 . ./test-lib.sh
 
 LIB_CRLF_BRANCHES=""
@@ -8,9 +9,9 @@ LIB_CRLF_BRANCHES=""
 create_crlf_ref () {
 	branch="$1" &&
 	cat >.crlf-orig-$branch.txt &&
-	cat .crlf-orig-$branch.txt | append_cr >.crlf-message-$branch.txt &&
+	append_cr <.crlf-orig-$branch.txt >.crlf-message-$branch.txt &&
 	grep 'Subject' .crlf-orig-$branch.txt | tr '\n' ' ' | sed 's/[ ]*$//' | tr -d '\n' >.crlf-subject-$branch.txt &&
-	grep 'Body' .crlf-message-$branch.txt >.crlf-body-$branch.txt || true &&
+	grep 'Body' .crlf-orig-$branch.txt | append_cr >.crlf-body-$branch.txt &&
 	LIB_CRLF_BRANCHES="${LIB_CRLF_BRANCHES} ${branch}" &&
 	test_tick &&
 	hash=$(git commit-tree HEAD^{tree} -p HEAD -F .crlf-message-${branch}.txt) &&
@@ -80,7 +81,7 @@ test_crlf_subject_body_and_contents() {
 
 
 test_expect_success 'Setup refs with commit and tag messages using CRLF' '
-	test_commit inital &&
+	test_commit initial &&
 	create_crlf_refs
 '
 
@@ -95,7 +96,7 @@ test_expect_success 'branch: --verbose works with messages using CRLF' '
 	git branch -v >tmp &&
 	# Remove first two columns, and the line for the currently checked out branch
 	current=$(git branch --show-current) &&
-	grep -v $current <tmp | awk "{\$1=\$2=\"\"}1"  >actual &&
+	awk "/$current/ { next } { \$1 = \$2 = \"\" } 1" <tmp >actual &&
 	test_cmp expect actual
 '
 

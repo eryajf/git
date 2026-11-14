@@ -1,10 +1,11 @@
 #ifndef REFS_REF_CACHE_H
 #define REFS_REF_CACHE_H
 
-#include "cache.h"
+#include "hash.h"
 
 struct ref_dir;
 struct ref_store;
+struct repository;
 
 /*
  * If this ref_cache is filled lazily, this function is used to load
@@ -41,6 +42,7 @@ struct ref_value {
 	 * referred to by the last reference in the symlink chain.
 	 */
 	struct object_id oid;
+	char *referent;
 };
 
 /*
@@ -172,6 +174,7 @@ struct ref_entry *create_dir_entry(struct ref_cache *cache,
 				   const char *dirname, size_t len);
 
 struct ref_entry *create_ref_entry(const char *refname,
+				   const char *referent,
 				   const struct object_id *oid, int flag);
 
 /*
@@ -197,13 +200,6 @@ void free_ref_cache(struct ref_cache *cache);
  * done.
  */
 void add_entry_to_dir(struct ref_dir *dir, struct ref_entry *entry);
-
-/*
- * Find the value entry with the given name in dir, sorting ref_dirs
- * and recursing into subdirectories as necessary.  If the name is not
- * found or it corresponds to a directory entry, return NULL.
- */
-struct ref_entry *find_ref_entry(struct ref_dir *dir, const char *refname);
 
 /*
  * Start iterating over references in `cache`. If `prefix` is

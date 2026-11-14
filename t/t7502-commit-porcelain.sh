@@ -175,8 +175,7 @@ test_expect_success 'commit --trailer with "="' '
 	Reported-by: C3 E3
 	Mentored-by: C4 E4
 	EOF
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -195,8 +194,7 @@ test_expect_success 'commit --trailer with -c and "replace" as ifexists' '
 		commit --trailer "Mentored-by: C4 E4" \
 		 --trailer "Helped-by: C3 E3" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d"  commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -217,8 +215,7 @@ test_expect_success 'commit --trailer with -c and "add" as ifexists' '
 		commit --trailer "Reported-by: C3 E3" \
 		--trailer "Mentored-by: C4 E4" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d"  commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -238,8 +235,7 @@ test_expect_success 'commit --trailer with -c and "donothing" as ifexists' '
 		commit --trailer "Mentored-by: C5 E5" \
 		--trailer "Reviewed-by: C6 E6" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d"  commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -259,8 +255,7 @@ test_expect_success 'commit --trailer with -c and "addIfDifferent" as ifexists' 
 		commit --trailer "Reported-by: C3 E3" \
 		--trailer "Mentored-by: C5 E5" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d"  commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -280,8 +275,7 @@ test_expect_success 'commit --trailer with -c and "addIfDifferentNeighbor" as if
 		commit --trailer "Mentored-by: C4 E4" \
 		--trailer "Reported-by: C3 E3" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d"  commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -302,8 +296,7 @@ test_expect_success 'commit --trailer with -c and "end" as where' '
 		commit --trailer "Reported-by: C3 E3" \
 		--trailer "Mentored-by: C4 E4" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -323,8 +316,7 @@ test_expect_success 'commit --trailer with -c and "start" as where' '
 		commit --trailer "Signed-off-by: C O Mitter <committer@example.com>" \
 		--trailer "Signed-off-by: C1 E1" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -344,8 +336,7 @@ test_expect_success 'commit --trailer with -c and "after" as where' '
 		commit --trailer "Mentored-by: C4 E4" \
 		--trailer "Mentored-by: C5 E5" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -366,8 +357,7 @@ test_expect_success 'commit --trailer with -c and "before" as where' '
 		commit --trailer "Mentored-by: C3 E3" \
 		--trailer "Mentored-by: C2 E2" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -387,8 +377,7 @@ test_expect_success 'commit --trailer with -c and "donothing" as ifmissing' '
 		commit --trailer "Helped-by: C5 E5" \
 		--trailer "Based-by: C6 E6" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -409,8 +398,7 @@ test_expect_success 'commit --trailer with -c and "add" as ifmissing' '
 		commit --trailer "Helped-by: C5 E5" \
 		--trailer "Based-by: C6 E6" \
 		--amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -424,8 +412,7 @@ test_expect_success 'commit --trailer with -c ack.key ' '
 	EOF
 	git -c trailer.ack.key="Acked-by" \
 		commit --trailer "ack = Peff" -m "hello" &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -440,8 +427,7 @@ test_expect_success 'commit --trailer with -c and ":=#" as separators' '
 	git -c trailer.separators=":=#" \
 		-c trailer.bug.key="Bug #" \
 		commit --trailer "bug = 42" -m "I hate bug" &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -461,8 +447,42 @@ test_expect_success 'commit --trailer with -c and command' '
 		-c trailer.report.command="NAME=\"\$ARG\"; test -n \"\$NAME\" && \
 		git log --author=\"\$NAME\" -1 --format=\"format:%aN <%aE>\" || true" \
 		commit --trailer "report = author" --amend &&
-	git cat-file commit HEAD >commit.msg &&
-	sed -e "1,/^\$/d" commit.msg >actual &&
+	commit_body HEAD >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success 'commit --trailer not confused by --- separator' '
+	cat >msg <<-\EOF &&
+	subject
+
+	body with dashes
+	---
+	in it
+	EOF
+	git commit --allow-empty --trailer="my-trailer: value" -F msg &&
+	{
+		cat msg &&
+		echo &&
+		echo "my-trailer: value"
+	} >expected &&
+	commit_body HEAD >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success 'commit --trailer with --verbose' '
+	cat >msg <<-\EOF &&
+	subject
+
+	body
+	EOF
+	GIT_EDITOR=: git commit --edit -F msg --allow-empty \
+		--trailer="my-trailer: value" --verbose &&
+	{
+		cat msg &&
+		echo &&
+		echo "my-trailer: value"
+	} >expected &&
+	commit_body HEAD >actual &&
 	test_cmp expected actual
 '
 
@@ -471,7 +491,7 @@ test_expect_success 'multiple -m' '
 	>negative &&
 	git add negative &&
 	git commit -m "one" -m "two" -m "three" &&
-	actual=$(git cat-file commit HEAD >tmp && sed -e "1,/^\$/d" tmp && rm tmp) &&
+	actual=$(commit_body HEAD) &&
 	expected=$(test_write_lines "one" "" "two" "" "three") &&
 	test "z$actual" = "z$expected"
 
@@ -492,7 +512,7 @@ test_expect_success 'verbose respects diff config' '
 
 	test_config diff.noprefix true &&
 	git status -v >actual &&
-	grep "diff --git negative negative" actual
+	test_grep "diff --git negative negative" actual
 '
 
 mesg_with_comment_and_newlines='
@@ -508,8 +528,7 @@ test_expect_success 'cleanup commit messages (verbatim option,-t)' '
 
 	echo >>negative &&
 	git commit --cleanup=verbatim --no-status -t expect -a &&
-	git cat-file -p HEAD >raw &&
-	sed -e "1,/^\$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 
 '
@@ -518,8 +537,7 @@ test_expect_success 'cleanup commit messages (verbatim option,-F)' '
 
 	echo >>negative &&
 	git commit --cleanup=verbatim -F expect -a &&
-	git cat-file -p HEAD >raw &&
-	sed -e "1,/^\$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 
 '
@@ -528,8 +546,7 @@ test_expect_success 'cleanup commit messages (verbatim option,-m)' '
 
 	echo >>negative &&
 	git commit --cleanup=verbatim -m "$mesg_with_comment_and_newlines" -a &&
-	git cat-file -p HEAD >raw &&
-	sed -e "1,/^\$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 
 '
@@ -540,8 +557,7 @@ test_expect_success 'cleanup commit messages (whitespace option,-F)' '
 	test_write_lines "" "# text" "" >text &&
 	echo "# text" >expect &&
 	git commit --cleanup=whitespace -F text -a &&
-	git cat-file -p HEAD >raw &&
-	sed -e "1,/^\$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 
 '
@@ -568,8 +584,7 @@ test_expect_success 'cleanup commit messages (scissors option,-F,-e)' '
 	# to be kept, too
 	EOF
 	git commit --cleanup=scissors -e -F text -a &&
-	git cat-file -p HEAD >raw &&
-	sed -e "1,/^\$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -581,8 +596,7 @@ test_expect_success 'cleanup commit messages (scissors option,-F,-e, scissors on
 	to be removed
 	EOF
 	git commit --cleanup=scissors -e -F text -a --allow-empty-message &&
-	git cat-file -p HEAD >raw &&
-	sed -e "1,/^\$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_must_be_empty actual
 '
 
@@ -592,8 +606,7 @@ test_expect_success 'cleanup commit messages (strip option,-F)' '
 	test_write_lines "" "# text" "sample" "" >text &&
 	echo sample >expect &&
 	git commit --cleanup=strip -F text -a &&
-	git cat-file -p HEAD >raw &&
-	sed -e "1,/^\$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 
 '
@@ -687,16 +700,21 @@ test_expect_success 'cleanup commit message (whitespace config, -m)' '
 test_expect_success 'message shows author when it is not equal to committer' '
 	echo >>negative &&
 	git commit -e -m "sample" -a &&
-	test_i18ngrep \
+	test_grep \
 	  "^# Author: *A U Thor <author@example.com>\$" \
 	  .git/COMMIT_EDITMSG
 '
 
 test_expect_success 'message shows date when it is explicitly set' '
 	git commit --allow-empty -e -m foo --date="2010-01-02T03:04:05" &&
-	test_i18ngrep \
+	test_grep \
 	  "^# Date: *Sat Jan 2 03:04:05 2010 +0000" \
 	  .git/COMMIT_EDITMSG
+'
+
+test_expect_success 'message does not have multiple scissors lines' '
+	git commit --cleanup=scissors -v --allow-empty -e -m foo &&
+	test $(grep -c -e "--- >8 ---" .git/COMMIT_EDITMSG) -eq 1
 '
 
 test_expect_success AUTOIDENT 'message shows committer when it is automatic' '
@@ -709,7 +727,7 @@ test_expect_success AUTOIDENT 'message shows committer when it is automatic' '
 	) &&
 	# the ident is calculated from the system, so we cannot
 	# check the actual value, only that it is there
-	test_i18ngrep "^# Committer: " .git/COMMIT_EDITMSG
+	test_grep "^# Committer: " .git/COMMIT_EDITMSG
 '
 
 write_script .git/FAKE_EDITOR <<EOF
@@ -807,8 +825,7 @@ test_expect_success 'A single-liner subject with a token plus colon is not a foo
 
 	git reset --hard &&
 	git commit -s -m "hello: kitty" --allow-empty &&
-	git cat-file commit HEAD >raw &&
-	sed -e "1,/^$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_line_count = 3 actual
 
 '
@@ -841,9 +858,9 @@ try_commit () {
 	GIT_EDITOR=.git/FAKE_EDITOR git commit -a $* $use_template &&
 	case "$use_template" in
 	'')
-		test_i18ngrep ! "^## Custom template" .git/COMMIT_EDITMSG ;;
+		test_grep ! "^## Custom template" .git/COMMIT_EDITMSG ;;
 	*)
-		test_i18ngrep "^## Custom template" .git/COMMIT_EDITMSG ;;
+		test_grep "^## Custom template" .git/COMMIT_EDITMSG ;;
 	esac
 }
 
@@ -851,53 +868,53 @@ try_commit_status_combo () {
 
 	test_expect_success 'commit' '
 		try_commit "" &&
-		test_i18ngrep "^# Changes to be committed:" .git/COMMIT_EDITMSG
+		test_grep "^# Changes to be committed:" .git/COMMIT_EDITMSG
 	'
 
 	test_expect_success 'commit --status' '
 		try_commit --status &&
-		test_i18ngrep "^# Changes to be committed:" .git/COMMIT_EDITMSG
+		test_grep "^# Changes to be committed:" .git/COMMIT_EDITMSG
 	'
 
 	test_expect_success 'commit --no-status' '
 		try_commit --no-status &&
-		test_i18ngrep ! "^# Changes to be committed:" .git/COMMIT_EDITMSG
+		test_grep ! "^# Changes to be committed:" .git/COMMIT_EDITMSG
 	'
 
 	test_expect_success 'commit with commit.status = yes' '
 		test_config commit.status yes &&
 		try_commit "" &&
-		test_i18ngrep "^# Changes to be committed:" .git/COMMIT_EDITMSG
+		test_grep "^# Changes to be committed:" .git/COMMIT_EDITMSG
 	'
 
 	test_expect_success 'commit with commit.status = no' '
 		test_config commit.status no &&
 		try_commit "" &&
-		test_i18ngrep ! "^# Changes to be committed:" .git/COMMIT_EDITMSG
+		test_grep ! "^# Changes to be committed:" .git/COMMIT_EDITMSG
 	'
 
 	test_expect_success 'commit --status with commit.status = yes' '
 		test_config commit.status yes &&
 		try_commit --status &&
-		test_i18ngrep "^# Changes to be committed:" .git/COMMIT_EDITMSG
+		test_grep "^# Changes to be committed:" .git/COMMIT_EDITMSG
 	'
 
 	test_expect_success 'commit --no-status with commit.status = yes' '
 		test_config commit.status yes &&
 		try_commit --no-status &&
-		test_i18ngrep ! "^# Changes to be committed:" .git/COMMIT_EDITMSG
+		test_grep ! "^# Changes to be committed:" .git/COMMIT_EDITMSG
 	'
 
 	test_expect_success 'commit --status with commit.status = no' '
 		test_config commit.status no &&
 		try_commit --status &&
-		test_i18ngrep "^# Changes to be committed:" .git/COMMIT_EDITMSG
+		test_grep "^# Changes to be committed:" .git/COMMIT_EDITMSG
 	'
 
 	test_expect_success 'commit --no-status with commit.status = no' '
 		test_config commit.status no &&
 		try_commit --no-status &&
-		test_i18ngrep ! "^# Changes to be committed:" .git/COMMIT_EDITMSG
+		test_grep ! "^# Changes to be committed:" .git/COMMIT_EDITMSG
 	'
 
 }
@@ -911,16 +928,42 @@ try_commit_status_combo
 test_expect_success 'commit --status with custom comment character' '
 	test_config core.commentchar ";" &&
 	try_commit --status &&
-	test_i18ngrep "^; Changes to be committed:" .git/COMMIT_EDITMSG
+	test_grep "^; Changes to be committed:" .git/COMMIT_EDITMSG
 '
 
-test_expect_success 'switch core.commentchar' '
+test_expect_success !WITH_BREAKING_CHANGES 'switch core.commentchar' '
 	test_commit "#foo" foo &&
-	GIT_EDITOR=.git/FAKE_EDITOR git -c core.commentChar=auto commit --amend &&
-	test_i18ngrep "^; Changes to be committed:" .git/COMMIT_EDITMSG
+	cat >config-include <<-\EOF &&
+	[core]
+	    commentString=:
+	    commentString=%
+	    commentChar=auto
+	EOF
+	test_when_finished "rm config-include" &&
+	test_config include.path "$(pwd)/config-include" &&
+	test_config core.commentChar ! &&
+	GIT_EDITOR=.git/FAKE_EDITOR git commit --amend 2>err &&
+	sed -n "s/^hint: *\$//p; s/^hint: //p; s/^warning: //p" err >actual &&
+	cat >expect <<-EOF &&
+	Support for ${SQ}core.commentChar=auto${SQ} is deprecated and will be removed in Git 3.0
+
+	To use the default comment string (#) please run
+
+	    git config unset core.commentChar
+	    git config unset --file ~/config-include --all core.commentString
+	    git config unset --file ~/config-include core.commentChar
+
+	To set a custom comment string please run
+
+	    git config set --file ~/config-include core.commentChar <comment string>
+
+	where ${SQ}<comment string>${SQ} is the string you wish to use.
+	EOF
+	test_cmp expect actual &&
+	test_grep "^; Changes to be committed:" .git/COMMIT_EDITMSG
 '
 
-test_expect_success 'switch core.commentchar but out of options' '
+test_expect_success !WITH_BREAKING_CHANGES 'switch core.commentchar but out of options' '
 	cat >text <<\EOF &&
 # 1
 ; 2
@@ -938,6 +981,26 @@ EOF
 		test_set_editor .git/FAKE_EDITOR &&
 		test_must_fail git -c core.commentChar=auto commit --amend
 	)
+'
+
+test_expect_success WITH_BREAKING_CHANGES 'core.commentChar=auto is rejected' '
+	test_config core.commentChar auto &&
+	test_must_fail git rev-parse --git-dir 2>err &&
+	sed -n "s/^hint: *\$//p; s/^hint: //p; s/^fatal: //p" err >actual &&
+	cat >expect <<-EOF &&
+	Support for ${SQ}core.commentChar=auto${SQ} has been removed in Git 3.0
+
+	To use the default comment string (#) please run
+
+	    git config unset core.commentChar
+
+	To set a custom comment string please run
+
+	    git config set core.commentChar <comment string>
+
+	where ${SQ}<comment string>${SQ} is the string you wish to use.
+	EOF
+	test_cmp expect actual
 '
 
 test_done

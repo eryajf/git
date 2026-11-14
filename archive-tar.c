@@ -1,13 +1,21 @@
 /*
  * Copyright (c) 2005, 2006 Rene Scharfe
  */
-#include "cache.h"
+
+#define USE_THE_REPOSITORY_VARIABLE
+
+#include "git-compat-util.h"
 #include "config.h"
+#include "gettext.h"
+#include "git-zlib.h"
+#include "hex.h"
 #include "tar.h"
 #include "archive.h"
-#include "object-store.h"
-#include "streaming.h"
+#include "odb.h"
+#include "odb/streaming.h"
+#include "strbuf.h"
 #include "run-command.h"
+#include "write-or-die.h"
 
 #define RECORDSIZE	(512)
 #define BLOCKSIZE	(RECORDSIZE * 20)
@@ -121,22 +129,20 @@ static void write_trailer(void)
  */
 static int stream_blocked(struct repository *r, const struct object_id *oid)
 {
-	struct git_istream *st;
-	enum object_type type;
-	unsigned long sz;
+	struct odb_stream *st;
 	char buf[BLOCKSIZE];
 	ssize_t readlen;
 
-	st = open_istream(r, oid, &type, &sz, NULL);
+	st = odb_stream_from_object(r->objects, oid, NULL);
 	if (!st)
 		return error(_("cannot stream blob %s"), oid_to_hex(oid));
 	for (;;) {
-		readlen = read_istream(st, buf, sizeof(buf));
+		readlen = odb_stream_read(st, buf, sizeof(buf));
 		if (readlen <= 0)
 			break;
 		do_write_blocked(buf, readlen);
 	}
-	close_istream(st);
+	odb_stream_close(st);
 	if (!readlen)
 		finish_record();
 	return readlen;
@@ -360,13 +366,14 @@ static struct archiver *find_tar_filter(const char *name, size_t len)
 	int i;
 	for (i = 0; i < nr_tar_filters; i++) {
 		struct archiver *ar = tar_filters[i];
-		if (!strncmp(ar->name, name, len) && !ar->name[len])
+		if (!xstrncmpz(ar->name, name, len))
 			return ar;
 	}
 	return NULL;
 }
 
-static int tar_filter_config(const char *var, const char *value, void *data)
+static int tar_filter_config(const char *var, const char *value,
+			     void *data UNUSED)
 {
 	struct archiver *ar;
 	const char *name;
@@ -405,14 +412,15 @@ static int tar_filter_config(const char *var, const char *value, void *data)
 	return 0;
 }
 
-static int git_tar_config(const char *var, const char *value, void *cb)
+static int git_tar_config(const char *var, const char *value,
+			  const struct config_context *ctx, void *cb)
 {
 	if (!strcmp(var, "tar.umask")) {
 		if (value && !strcmp(value, "user")) {
 			tar_umask = umask(0);
 			umask(tar_umask);
 		} else {
-			tar_umask = git_config_int(var, value);
+			tar_umask = git_config_int(var, value, ctx->kvi);
 		}
 		return 0;
 	}
@@ -420,7 +428,7 @@ static int git_tar_config(const char *var, const char *value, void *cb)
 	return tar_filter_config(var, value, cb);
 }
 
-static int write_tar_archive(const struct archiver *ar,
+static int write_tar_archive(const struct archiver *ar UNUSED,
 			     struct archiver_args *args)
 {
 	int err = 0;
@@ -463,9 +471,7 @@ static const char internal_gzip_command[] = "git archive gzip";
 static int write_tar_filter_archive(const struct archiver *ar,
 				    struct archiver_args *args)
 {
-#if ZLIB_VERNUM >= 0x1221
 	struct gz_header_s gzhead = { .os = 3 }; /* Unix, for reproducibility */
-#endif
 	struct strbuf cmd = STRBUF_INIT;
 	struct child_process filter = CHILD_PROCESS_INIT;
 	int r;
@@ -476,10 +482,8 @@ static int write_tar_filter_archive(const struct archiver *ar,
 	if (!strcmp(ar->filter_command, internal_gzip_command)) {
 		write_block = tgz_write_block;
 		git_deflate_init_gzip(&gzstream, args->compression_level);
-#if ZLIB_VERNUM >= 0x1221
 		if (deflateSetHeader(&gzstream.z, &gzhead) != Z_OK)
 			BUG("deflateSetHeader() called too late");
-#endif
 		gzstream.next_out = outbuf;
 		gzstream.avail_out = sizeof(outbuf);
 
@@ -497,6 +501,7 @@ static int write_tar_filter_archive(const struct archiver *ar,
 	strvec_push(&filter.args, cmd.buf);
 	filter.use_shell = 1;
 	filter.in = -1;
+	filter.silent_exec_failure = 1;
 
 	if (start_command(&filter) < 0)
 		die_errno(_("unable to start '%s' filter"), cmd.buf);
@@ -530,7 +535,7 @@ void init_tar_archiver(void)
 	tar_filter_config("tar.tgz.remote", "true", NULL);
 	tar_filter_config("tar.tar.gz.command", internal_gzip_command, NULL);
 	tar_filter_config("tar.tar.gz.remote", "true", NULL);
-	git_config(git_tar_config, NULL);
+	repo_config(the_repository, git_tar_config, NULL);
 	for (i = 0; i < nr_tar_filters; i++) {
 		/* omit any filters that never had a command configured */
 		if (tar_filters[i]->filter_command)

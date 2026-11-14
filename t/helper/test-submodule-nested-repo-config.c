@@ -1,4 +1,8 @@
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "test-tool.h"
+#include "repository.h"
+#include "setup.h"
 #include "submodule-config.h"
 
 static void die_usage(const char **argv, const char *msg)
@@ -15,9 +19,9 @@ int cmd__submodule_nested_repo_config(int argc, const char **argv)
 	if (argc < 3)
 		die_usage(argv, "Wrong number of arguments.");
 
-	setup_git_directory();
+	setup_git_directory(the_repository);
 
-	if (repo_submodule_init(&subrepo, the_repository, argv[1], null_oid())) {
+	if (repo_submodule_init(&subrepo, the_repository, argv[1], null_oid(the_hash_algo))) {
 		die_usage(argv, "Submodule not found.");
 	}
 
@@ -25,6 +29,6 @@ int cmd__submodule_nested_repo_config(int argc, const char **argv)
 	print_config_from_gitmodules(&subrepo, argv[2]);
 
 	submodule_free(the_repository);
-
+	repo_clear(&subrepo);
 	return 0;
 }

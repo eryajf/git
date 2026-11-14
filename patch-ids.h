@@ -20,7 +20,7 @@ struct patch_ids {
 };
 
 int commit_patch_id(struct commit *commit, struct diff_options *options,
-		    struct object_id *oid, int, int);
+		    struct object_id *oid, int);
 int init_patch_ids(struct repository *, struct patch_ids *);
 int free_patch_ids(struct patch_ids *);
 
@@ -37,7 +37,7 @@ int has_commit_patch_id(struct commit *commit, struct patch_ids *);
  *   struct patch_id *cur;
  *   for (cur = patch_id_iter_first(commit, ids);
  *        cur;
- *        cur = patch_id_iter_next(cur, ids) {
+ *        cur = patch_id_iter_next(cur, ids)) {
  *           ... look at cur->commit
  *   }
  */

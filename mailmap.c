@@ -1,20 +1,11 @@
-#include "cache.h"
+#include "git-compat-util.h"
+#include "environment.h"
 #include "string-list.h"
 #include "mailmap.h"
-#include "object-store.h"
-
-#define DEBUG_MAILMAP 0
-#if DEBUG_MAILMAP
-#define debug_mm(...) fprintf(stderr, __VA_ARGS__)
-#define debug_str(X) ((X) ? (X) : "(none)")
-#else
-__attribute__((format (printf, 1, 2)))
-static inline void debug_mm(const char *format, ...) {}
-static inline const char *debug_str(const char *s) { return s; }
-#endif
-
-const char *git_mailmap_file;
-const char *git_mailmap_blob;
+#include "object-name.h"
+#include "odb.h"
+#include "setup.h"
+#include "config.h"
 
 struct mailmap_info {
 	char *name;
@@ -30,23 +21,17 @@ struct mailmap_entry {
 	struct string_list namemap;
 };
 
-static void free_mailmap_info(void *p, const char *s)
+static void free_mailmap_info(void *p, const char *s UNUSED)
 {
 	struct mailmap_info *mi = (struct mailmap_info *)p;
-	debug_mm("mailmap: -- complex: '%s' -> '%s' <%s>\n",
-		 s, debug_str(mi->name), debug_str(mi->email));
 	free(mi->name);
 	free(mi->email);
 	free(mi);
 }
 
-static void free_mailmap_entry(void *p, const char *s)
+static void free_mailmap_entry(void *p, const char *s UNUSED)
 {
 	struct mailmap_entry *me = (struct mailmap_entry *)p;
-	debug_mm("mailmap: removing entries for <%s>, with %"PRIuMAX" sub-entries\n",
-		 s, (uintmax_t)me->namemap.nr);
-	debug_mm("mailmap: - simple: '%s' <%s>\n",
-		 debug_str(me->name), debug_str(me->email));
 
 	free(me->name);
 	free(me->email);
@@ -93,8 +78,6 @@ static void add_mapping(struct string_list *map,
 	}
 
 	if (!old_name) {
-		debug_mm("mailmap: adding (simple) entry for '%s'\n", old_email);
-
 		/* Replace current name and new email for simple entry */
 		if (new_name) {
 			free(me->name);
@@ -106,15 +89,10 @@ static void add_mapping(struct string_list *map,
 		}
 	} else {
 		struct mailmap_info *mi = xcalloc(1, sizeof(struct mailmap_info));
-		debug_mm("mailmap: adding (complex) entry for '%s'\n", old_email);
 		mi->name = xstrdup_or_null(new_name);
 		mi->email = xstrdup_or_null(new_email);
 		string_list_insert(&me->namemap, old_name)->util = mi;
 	}
-
-	debug_mm("mailmap:  '%s' <%s> -> '%s' <%s>\n",
-		 debug_str(old_name), old_email,
-		 debug_str(new_name), debug_str(new_email));
 }
 
 static char *parse_name_and_email(char *buffer, char **name,
@@ -160,11 +138,8 @@ static void read_mailmap_line(struct string_list *map, char *buffer)
 		add_mapping(map, name1, email1, name2, email2);
 }
 
-/* Flags for read_mailmap_file() */
-#define MAILMAP_NOFOLLOW (1<<0)
-
-static int read_mailmap_file(struct string_list *map, const char *filename,
-			     unsigned flags)
+int read_mailmap_file(struct string_list *map, const char *filename,
+		      unsigned flags)
 {
 	char buffer[1024];
 	FILE *f;
@@ -204,23 +179,26 @@ static void read_mailmap_string(struct string_list *map, char *buf)
 	}
 }
 
-static int read_mailmap_blob(struct string_list *map, const char *name)
+int read_mailmap_blob(struct repository *repo, struct string_list *map,
+		      const char *name)
 {
 	struct object_id oid;
 	char *buf;
-	unsigned long size;
+	size_t size;
 	enum object_type type;
 
 	if (!name)
 		return 0;
-	if (get_oid(name, &oid) < 0)
+	if (repo_get_oid(repo, name, &oid) < 0)
 		return 0;
 
-	buf = read_object_file(&oid, &type, &size);
+	buf = odb_read_object(repo->objects, &oid, &type, &size);
 	if (!buf)
 		return error("unable to read mailmap object at %s", name);
-	if (type != OBJ_BLOB)
+	if (type != OBJ_BLOB) {
+		free(buf);
 		return error("mailmap is not a blob: %s", name);
+	}
 
 	read_mailmap_string(map, buf);
 
@@ -228,33 +206,39 @@ static int read_mailmap_blob(struct string_list *map, const char *name)
 	return 0;
 }
 
-int read_mailmap(struct string_list *map)
+int read_mailmap(struct repository *repo, struct string_list *map)
 {
 	int err = 0;
+	char *mailmap_file = NULL, *mailmap_blob = NULL;
+
+	repo_config_get_pathname(repo, "mailmap.file", &mailmap_file);
+	repo_config_get_string(repo, "mailmap.blob", &mailmap_blob);
 
 	map->strdup_strings = 1;
 	map->cmp = namemap_cmp;
 
-	if (!git_mailmap_blob && is_bare_repository())
-		git_mailmap_blob = "HEAD:.mailmap";
+	if (!mailmap_blob && is_bare_repository(repo))
+		mailmap_blob = xstrdup("HEAD:.mailmap");
 
-	if (!startup_info->have_repository || !is_bare_repository())
+	if (!startup_info->have_repository || !is_bare_repository(repo))
 		err |= read_mailmap_file(map, ".mailmap",
 					 startup_info->have_repository ?
 					 MAILMAP_NOFOLLOW : 0);
 	if (startup_info->have_repository)
-		err |= read_mailmap_blob(map, git_mailmap_blob);
-	err |= read_mailmap_file(map, git_mailmap_file, 0);
+		err |= read_mailmap_blob(repo, map, mailmap_blob);
+
+	err |= read_mailmap_file(map, mailmap_file, 0);
+
+	free(mailmap_file);
+	free(mailmap_blob);
+
 	return err;
 }
 
 void clear_mailmap(struct string_list *map)
 {
-	debug_mm("mailmap: clearing %"PRIuMAX" entries...\n",
-		 (uintmax_t)map->nr);
 	map->strdup_strings = 1;
 	string_list_clear_func(map, free_mailmap_entry);
-	debug_mm("mailmap: cleared\n");
 }
 
 /*
@@ -264,10 +248,9 @@ void clear_mailmap(struct string_list *map)
 static struct string_list_item *lookup_prefix(struct string_list *map,
 					      const char *string, size_t len)
 {
-	int i = string_list_find_insert_index(map, string, 1);
-	if (i < 0) {
-		/* exact match */
-		i = -1 - i;
+	bool exact_match;
+	size_t i = string_list_find_insert_index(map, string, &exact_match);
+	if (exact_match) {
 		if (!string[len])
 			return &map->items[i];
 		/*
@@ -288,7 +271,7 @@ static struct string_list_item *lookup_prefix(struct string_list *map,
 	 * overlong key would be inserted, which must come after the
 	 * real location of the key if one exists.
 	 */
-	while (0 <= --i && i < map->nr) {
+	while (i-- && i < map->nr) {
 		int cmp = strncasecmp(map->items[i].string, string, len);
 		if (cmp < 0)
 			/*
@@ -315,10 +298,6 @@ int map_user(struct string_list *map,
 	struct string_list_item *item;
 	struct mailmap_entry *me;
 
-	debug_mm("map_user: map '%.*s' <%.*s>\n",
-		 (int)*namelen, debug_str(*name),
-		 (int)*emaillen, debug_str(*email));
-
 	item = lookup_prefix(map, *email, *emaillen);
 	if (item) {
 		me = (struct mailmap_entry *)item->util;
@@ -336,10 +315,8 @@ int map_user(struct string_list *map,
 	}
 	if (item) {
 		struct mailmap_info *mi = (struct mailmap_info *)item->util;
-		if (mi->name == NULL && mi->email == NULL) {
-			debug_mm("map_user:  -- (no simple mapping)\n");
+		if (mi->name == NULL && mi->email == NULL)
 			return 0;
-		}
 		if (mi->email) {
 				*email = mi->email;
 				*emaillen = strlen(*email);
@@ -348,11 +325,7 @@ int map_user(struct string_list *map,
 				*name = mi->name;
 				*namelen = strlen(*name);
 		}
-		debug_mm("map_user:  to '%.*s' <%.*s>\n",
-			 (int)*namelen, debug_str(*name),
-			 (int)*emaillen, debug_str(*email));
 		return 1;
 	}
-	debug_mm("map_user:  --\n");
 	return 0;
 }

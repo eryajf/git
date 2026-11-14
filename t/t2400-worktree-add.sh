@@ -42,8 +42,12 @@ test_expect_success '"add" using - shorthand' '
 
 test_expect_success '"add" refuses to checkout locked branch' '
 	test_must_fail git worktree add zere main &&
-	! test -d zere &&
-	! test -d .git/worktrees/zere
+	test_path_is_missing zere &&
+	test_path_is_missing .git/worktrees/zere
+'
+
+test_expect_success '"add" rejects an empty path' '
+	test_must_fail git worktree add "" HEAD
 '
 
 test_expect_success 'checking out paths not complaining about linked checkouts' '
@@ -70,14 +74,14 @@ test_expect_success '"add" worktree' '
 test_expect_success '"add" worktree with lock' '
 	git worktree add --detach --lock here-with-lock main &&
 	test_when_finished "git worktree unlock here-with-lock || :" &&
-	test -f .git/worktrees/here-with-lock/locked
+	test_path_is_file .git/worktrees/here-with-lock/locked
 '
 
 test_expect_success '"add" worktree with lock and reason' '
 	lock_reason="why not" &&
 	git worktree add --detach --lock --reason "$lock_reason" here-with-lock-reason main &&
 	test_when_finished "git worktree unlock here-with-lock-reason || :" &&
-	test -f .git/worktrees/here-with-lock-reason/locked &&
+	test_path_is_file .git/worktrees/here-with-lock-reason/locked &&
 	echo "$lock_reason" >expect &&
 	test_cmp expect .git/worktrees/here-with-lock-reason/locked
 '
@@ -121,7 +125,30 @@ test_expect_success '"add" worktree creating new branch' '
 test_expect_success 'die the same branch is already checked out' '
 	(
 		cd here &&
-		test_must_fail git checkout newmain
+		test_must_fail git checkout newmain 2>actual &&
+		test_grep "already used by worktree at" actual
+	)
+'
+
+test_expect_success 'refuse to reset a branch in use elsewhere' '
+	(
+		cd here &&
+
+		# we know we are on detached HEAD but just in case ...
+		git checkout --detach HEAD &&
+		git rev-parse --verify HEAD >old.head &&
+
+		git rev-parse --verify refs/heads/newmain >old.branch &&
+		test_must_fail git checkout -B newmain 2>error &&
+		git rev-parse --verify refs/heads/newmain >new.branch &&
+		git rev-parse --verify HEAD >new.head &&
+
+		test_grep "already used by worktree at" error &&
+		test_cmp old.branch new.branch &&
+		test_cmp old.head new.head &&
+
+		# and we must be still on the same detached HEAD state
+		test_must_fail git symbolic-ref HEAD
 	)
 '
 
@@ -271,6 +298,11 @@ test_expect_success '"add" with <branch> omitted' '
 	test_cmp_rev HEAD bat
 '
 
+test_expect_success '"add" with trailing slash and <branch> omitted' '
+	git worktree add waffle/bit/ &&
+	test_cmp_rev HEAD bit
+'
+
 test_expect_success '"add" checks out existing branch of dwimd name' '
 	git branch dwim HEAD~1 &&
 	git worktree add dwim &&
@@ -298,17 +330,24 @@ test_expect_success '"add" no auto-vivify with --detach and <branch> omitted' '
 	test_must_fail git -C mish/mash symbolic-ref HEAD
 '
 
-test_expect_success '"add" -b/-B mutually exclusive' '
-	test_must_fail git worktree add -b poodle -B poodle bamboo main
-'
+# Helper function to test mutually exclusive options.
+#
+# Note: Quoted arguments containing spaces are not supported.
+test_wt_add_excl () {
+	local opts="$*" &&
+	test_expect_success "'worktree add' with '$opts' has mutually exclusive options" '
+		test_must_fail git worktree add $opts 2>actual &&
+		test_grep -E "fatal:( options)? .* cannot be used together" actual
+	'
+}
 
-test_expect_success '"add" -b/--detach mutually exclusive' '
-	test_must_fail git worktree add -b poodle --detach bamboo main
-'
-
-test_expect_success '"add" -B/--detach mutually exclusive' '
-	test_must_fail git worktree add -B poodle --detach bamboo main
-'
+test_wt_add_excl -b poodle -B poodle bamboo main
+test_wt_add_excl -b poodle --detach bamboo main
+test_wt_add_excl -B poodle --detach bamboo main
+test_wt_add_excl --orphan --detach bamboo
+test_wt_add_excl --orphan --no-checkout bamboo
+test_wt_add_excl --orphan bamboo main
+test_wt_add_excl --orphan -b bamboo wtdir/ main
 
 test_expect_success '"add -B" fails if the branch is checked out' '
 	git rev-parse newmain >before &&
@@ -326,8 +365,117 @@ test_expect_success 'add -B' '
 '
 
 test_expect_success 'add --quiet' '
+	test_when_finished "git worktree remove -f -f another-worktree" &&
 	git worktree add --quiet another-worktree main 2>actual &&
 	test_must_be_empty actual
+'
+
+test_expect_success 'add --quiet -b' '
+	test_when_finished "git branch -D quietnewbranch" &&
+	test_when_finished "git worktree remove -f -f another-worktree" &&
+	git worktree add --quiet -b quietnewbranch another-worktree 2>actual &&
+	test_must_be_empty actual
+'
+
+test_expect_success '"add --orphan"' '
+	test_when_finished "git worktree remove -f -f orphandir" &&
+	git worktree add --orphan -b neworphan orphandir &&
+	echo refs/heads/neworphan >expected &&
+	git -C orphandir symbolic-ref HEAD >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success '"add --orphan (no -b)"' '
+	test_when_finished "git worktree remove -f -f neworphan" &&
+	git worktree add --orphan neworphan &&
+	echo refs/heads/neworphan >expected &&
+	git -C neworphan symbolic-ref HEAD >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success '"add --orphan with trailing slash (no -b)"' '
+	test_when_finished "git worktree remove -f -f neworphan" &&
+	git worktree add --orphan ./neworphan/ &&
+	echo refs/heads/neworphan >expected &&
+	git -C neworphan symbolic-ref HEAD >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success '"add --orphan --quiet"' '
+	test_when_finished "git worktree remove -f -f orphandir" &&
+	git worktree add --quiet --orphan -b neworphan orphandir 2>log.actual &&
+	test_must_be_empty log.actual &&
+	echo refs/heads/neworphan >expected &&
+	git -C orphandir symbolic-ref HEAD >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success '"add --orphan" fails if the branch already exists' '
+	test_when_finished "git branch -D existingbranch" &&
+	git worktree add -b existingbranch orphandir main &&
+	git worktree remove orphandir &&
+	test_must_fail git worktree add --orphan -b existingbranch orphandir
+'
+
+test_expect_success '"add --orphan" with empty repository' '
+	test_when_finished "rm -rf empty_repo" &&
+	echo refs/heads/newbranch >expected &&
+	GIT_DIR="empty_repo" git init --bare &&
+	git -C empty_repo worktree add --orphan -b newbranch worktreedir &&
+	git -C empty_repo/worktreedir symbolic-ref HEAD >actual &&
+	test_cmp expected actual
+'
+
+test_expect_success '"add" worktree with orphan branch and lock' '
+	git worktree add --lock --orphan -b orphanbr orphan-with-lock &&
+	test_when_finished "git worktree unlock orphan-with-lock || :" &&
+	test_path_is_file .git/worktrees/orphan-with-lock/locked
+'
+
+test_expect_success '"add" worktree with orphan branch, lock, and reason' '
+	lock_reason="why not" &&
+	git worktree add --detach --lock --reason "$lock_reason" orphan-with-lock-reason main &&
+	test_when_finished "git worktree unlock orphan-with-lock-reason || :" &&
+	test_path_is_file .git/worktrees/orphan-with-lock-reason/locked &&
+	echo "$lock_reason" >expect &&
+	test_cmp expect .git/worktrees/orphan-with-lock-reason/locked
+'
+
+# Note: Quoted arguments containing spaces are not supported.
+test_wt_add_orphan_hint () {
+	local context="$1" &&
+	local use_branch="$2" &&
+	shift 2 &&
+	local opts="$*" &&
+	test_expect_success "'worktree add' show orphan hint in bad/orphan HEAD w/ $context" '
+		test_when_finished "rm -rf repo" &&
+		git init repo &&
+		(cd repo && test_commit commit) &&
+		git -C repo switch --orphan noref &&
+		test_must_fail git -C repo worktree add $opts foobar/ 2>actual &&
+		test_grep ! "error: unknown switch" actual &&
+		test_grep "hint: If you meant to create a worktree containing a new unborn branch" actual &&
+		if [ $use_branch -eq 1 ]
+		then
+			test_grep -E "^hint: +git worktree add --orphan -b [^ ]+ [^ ]+$" actual
+		else
+			test_grep -E "^hint: +git worktree add --orphan [^ ]+$" actual
+		fi
+
+	'
+}
+
+test_wt_add_orphan_hint 'no opts' 0
+test_wt_add_orphan_hint '-b' 1 -b foobar_branch
+test_wt_add_orphan_hint '-B' 1 -B foobar_branch
+
+test_expect_success "'worktree add' doesn't show orphan hint in bad/orphan HEAD w/ --quiet" '
+	test_when_finished "rm -rf repo" &&
+	git init repo &&
+	(cd repo && test_commit commit) &&
+	test_must_fail git -C repo worktree add --quiet foobar_branch foobar/ 2>actual &&
+	test_grep ! "error: unknown switch" actual &&
+	test_grep ! "hint: If you meant to create a worktree containing a new unborn branch" actual
 '
 
 test_expect_success 'local clone from linked checkout' '
@@ -338,12 +486,12 @@ test_expect_success 'local clone from linked checkout' '
 test_expect_success 'local clone --shared from linked checkout' '
 	git -C bare worktree add --detach ../baretree &&
 	git clone --local --shared baretree bare-clone &&
-	grep /bare/ bare-clone/.git/objects/info/alternates
+	test_grep /bare/ bare-clone/.git/objects/info/alternates
 '
 
 test_expect_success '"add" worktree with --no-checkout' '
 	git worktree add --no-checkout -b swamp swamp &&
-	! test -e swamp/init.t &&
+	test_path_is_missing swamp/init.t &&
 	git -C swamp reset --hard &&
 	test_cmp init.t swamp/init.t
 '
@@ -359,13 +507,14 @@ test_expect_success 'put a worktree under rebase' '
 		cd under-rebase &&
 		set_fake_editor &&
 		FAKE_LINES="edit 1" git rebase -i HEAD^ &&
-		git worktree list | grep "under-rebase.*detached HEAD"
+		git worktree list >actual &&
+		test_grep "under-rebase.*detached HEAD" actual
 	)
 '
 
 test_expect_success 'add a worktree, checking out a rebased branch' '
 	test_must_fail git worktree add new-rebase under-rebase &&
-	! test -d new-rebase
+	test_path_is_missing new-rebase
 '
 
 test_expect_success 'checking out a rebased branch from another worktree' '
@@ -400,9 +549,10 @@ test_expect_success 'checkout a branch under bisect' '
 		git bisect start &&
 		git bisect bad &&
 		git bisect good HEAD~2 &&
-		git worktree list | grep "under-bisect.*detached HEAD" &&
+		git worktree list >actual &&
+		test_grep "under-bisect.*detached HEAD" actual &&
 		test_must_fail git worktree add new-bisect under-bisect &&
-		! test -d new-bisect
+		test_path_is_missing new-bisect
 	)
 '
 
@@ -446,6 +596,14 @@ setup_remote_repo () {
 	)
 }
 
+test_expect_success '"add" <path> <remote/branch> w/ no HEAD' '
+	test_when_finished rm -rf repo_upstream repo_local foo &&
+	setup_remote_repo repo_upstream repo_local &&
+	git -C repo_local config --bool core.bare true &&
+	git -C repo_local branch -D main &&
+	git -C repo_local worktree add ./foo repo_upstream/foo
+'
+
 test_expect_success '--no-track avoids setting up tracking' '
 	test_when_finished rm -rf repo_upstream repo_local foo &&
 	setup_remote_repo repo_upstream repo_local &&
@@ -480,15 +638,25 @@ test_expect_success '"add" <path> <branch> dwims' '
 	)
 '
 
+test_expect_success '"add" <path> <branch> does not dwim with -b' '
+	test_when_finished rm -rf repo_upstream repo_dwim wt &&
+	setup_remote_repo repo_upstream repo_dwim &&
+	(
+		cd repo_dwim &&
+		test_must_fail git worktree add -b branch ../wt foo 2>actual &&
+		test_grep "^fatal: invalid reference: foo" actual
+	)
+'
+
 test_expect_success '"add" <path> <branch> dwims with checkout.defaultRemote' '
 	test_when_finished rm -rf repo_upstream repo_dwim foo &&
 	setup_remote_repo repo_upstream repo_dwim &&
-	git init repo_dwim &&
 	(
 		cd repo_dwim &&
 		git remote add repo_upstream2 ../repo_upstream &&
 		git fetch repo_upstream2 &&
-		test_must_fail git worktree add ../foo foo &&
+		test_must_fail git worktree add ../foo foo 2>error.actual &&
+		test_grep "matched multiple (2) remote tracking branches" error.actual &&
 		git -c checkout.defaultRemote=repo_upstream worktree add ../foo foo &&
 		git status -uno --porcelain >status.actual &&
 		test_must_be_empty status.actual
@@ -529,6 +697,48 @@ test_expect_success 'git worktree add --guess-remote sets up tracking' '
 	)
 '
 
+test_expect_success 'git worktree add --guess-remote fails if there are multiple matches' '
+	test_when_finished rm -rf repo_a repo_b foo &&
+	setup_remote_repo repo_a repo_b &&
+	(
+		cd repo_b &&
+		git remote add repo_a2 ../repo_a &&
+		git fetch repo_a2 &&
+		test_must_fail git worktree add --guess-remote ../foo 2>actual &&
+		test_grep "matched multiple (2) remote tracking branches" actual
+	)
+'
+
+test_expect_success 'git worktree add --guess-remote sets up tracking (quiet)' '
+	test_when_finished rm -rf repo_a repo_b foo &&
+	setup_remote_repo repo_a repo_b &&
+	(
+		cd repo_b &&
+		git worktree add --quiet --guess-remote ../foo 2>actual &&
+		test_must_be_empty actual
+	) &&
+	(
+		cd foo &&
+		test_branch_upstream foo repo_a foo &&
+		test_cmp_rev refs/remotes/repo_a/foo refs/heads/foo
+	)
+'
+
+test_expect_success 'git worktree --no-guess-remote (quiet)' '
+	test_when_finished rm -rf repo_a repo_b foo &&
+	setup_remote_repo repo_a repo_b &&
+	(
+		cd repo_b &&
+		git worktree add --quiet --no-guess-remote ../foo
+	) &&
+	(
+		cd foo &&
+		test_must_fail git config "branch.foo.remote" &&
+		test_must_fail git config "branch.foo.merge" &&
+		test_cmp_rev ! refs/remotes/repo_a/foo refs/heads/foo
+	)
+'
+
 test_expect_success 'git worktree add with worktree.guessRemote sets up tracking' '
 	test_when_finished rm -rf repo_a repo_b foo &&
 	setup_remote_repo repo_a repo_b &&
@@ -559,6 +769,344 @@ test_expect_success 'git worktree --no-guess-remote option overrides config' '
 		test_cmp_rev ! refs/remotes/repo_a/foo refs/heads/foo
 	)
 '
+
+test_dwim_orphan () {
+	local info_text="No possible source branch, inferring '--orphan'" &&
+	local fetch_error_text="fatal: No local or remote refs exist despite at least one remote" &&
+	local orphan_hint="hint: If you meant to create a worktree containing a new unborn branch" &&
+	local invalid_ref_regex="^fatal: invalid reference: " &&
+	local bad_combo_regex="^fatal: options '[-a-z]*' and '[-a-z]*' cannot be used together" &&
+
+	local git_ns="repo" &&
+	local dashc_args="-C $git_ns" &&
+	local use_cd=0 &&
+
+	local bad_head=0 &&
+	local empty_repo=1 &&
+	local local_ref=0 &&
+	local use_quiet=0 &&
+	local remote=0 &&
+	local remote_ref=0 &&
+	local use_detach=0 &&
+	local use_new_branch=0 &&
+
+	local outcome="$1" &&
+	local outcome_text &&
+	local success &&
+	shift &&
+	local args="" &&
+	local context="" &&
+	case "$outcome" in
+	"infer")
+		success=1 &&
+		outcome_text='"add" DWIM infer --orphan'
+		;;
+	"no_infer")
+		success=1 &&
+		outcome_text='"add" DWIM doesnt infer --orphan'
+		;;
+	"fetch_error")
+		success=0 &&
+		outcome_text='"add" error need fetch'
+		;;
+	"fatal_orphan_bad_combo")
+		success=0 &&
+		outcome_text='"add" error inferred "--orphan" gives illegal opts combo'
+		;;
+	"warn_bad_head")
+		success=0 &&
+		outcome_text='"add" error, warn on bad HEAD, hint use orphan'
+		;;
+	*)
+		echo "test_dwim_orphan(): invalid outcome: '$outcome'" >&2 &&
+		return 1
+		;;
+	esac &&
+	while [ $# -gt 0 ]
+	do
+		case "$1" in
+		# How and from where to create the worktree
+		"-C_repo")
+			use_cd=0 &&
+			git_ns="repo" &&
+			dashc_args="-C $git_ns" &&
+			context="$context, 'git -C repo'"
+			;;
+		"-C_wt")
+			use_cd=0 &&
+			git_ns="wt" &&
+			dashc_args="-C $git_ns" &&
+			context="$context, 'git -C wt'"
+			;;
+		"cd_repo")
+			use_cd=1 &&
+			git_ns="repo" &&
+			dashc_args="" &&
+			context="$context, 'cd repo && git'"
+			;;
+		"cd_wt")
+			use_cd=1 &&
+			git_ns="wt" &&
+			dashc_args="" &&
+			context="$context, 'cd wt && git'"
+			;;
+
+		# Bypass the "pull first" warning
+		"force")
+			args="$args --force" &&
+			context="$context, --force"
+			;;
+
+		# Try to use remote refs when DWIM
+		"guess_remote")
+			args="$args --guess-remote" &&
+			context="$context, --guess-remote"
+			;;
+		"no_guess_remote")
+			args="$args --no-guess-remote" &&
+			context="$context, --no-guess-remote"
+			;;
+
+		# Whether there is at least one local branch present
+		"local_ref")
+			empty_repo=0 &&
+			local_ref=1 &&
+			context="$context, >=1 local branches"
+			;;
+		"no_local_ref")
+			empty_repo=0 &&
+			context="$context, 0 local branches"
+			;;
+
+		# Whether the HEAD points at a valid ref (skip this opt when no refs)
+		"good_head")
+			# requires: local_ref
+			context="$context, valid HEAD"
+			;;
+		"bad_head")
+			bad_head=1 &&
+			context="$context, invalid (or orphan) HEAD"
+			;;
+
+		# Whether the code path is tested with the base add command, -b, or --detach
+		"no_-b")
+			use_new_branch=0 &&
+			context="$context, no --branch"
+			;;
+		"-b")
+			use_new_branch=1 &&
+			context="$context, --branch"
+			;;
+		"detach")
+			use_detach=1 &&
+			context="$context, --detach"
+			;;
+
+		# Whether to check that all output is suppressed (except errors)
+		# or that the output is as expected
+		"quiet")
+			use_quiet=1 &&
+			args="$args --quiet" &&
+			context="$context, --quiet"
+			;;
+		"no_quiet")
+			use_quiet=0 &&
+			context="$context, no --quiet (expect output)"
+			;;
+
+		# Whether there is at least one remote attached to the repo
+		"remote")
+			empty_repo=0 &&
+			remote=1 &&
+			context="$context, >=1 remotes"
+			;;
+		"no_remote")
+			empty_repo=0 &&
+			remote=0 &&
+			context="$context, 0 remotes"
+			;;
+
+		# Whether there is at least one valid remote ref
+		"remote_ref")
+			# requires: remote
+			empty_repo=0 &&
+			remote_ref=1 &&
+			context="$context, >=1 fetched remote branches"
+			;;
+		"no_remote_ref")
+			empty_repo=0 &&
+			remote_ref=0 &&
+			context="$context, 0 fetched remote branches"
+			;;
+
+		# Options or flags that become illegal when --orphan is inferred
+		"no_checkout")
+			args="$args --no-checkout" &&
+			context="$context, --no-checkout"
+			;;
+		"track")
+			args="$args --track" &&
+			context="$context, --track"
+			;;
+
+		# All other options are illegal
+		*)
+			echo "test_dwim_orphan(): invalid arg: '$1'" >&2 &&
+			return 1
+			;;
+		esac &&
+		shift
+	done &&
+	context="${context#', '}" &&
+	if [ $use_new_branch -eq 1 ]
+	then
+		args="$args -b foo"
+	elif [ $use_detach -eq 1 ]
+	then
+		args="$args --detach"
+	else
+		context="DWIM (no --branch), $context"
+	fi &&
+	if [ $empty_repo -eq 1 ]
+	then
+		context="empty repo, $context"
+	fi &&
+	args="$args ../foo" &&
+	context="${context%', '}" &&
+	test_expect_success "$outcome_text w/ $context" '
+		test_when_finished "rm -rf repo" &&
+		git init repo &&
+		if [ $local_ref -eq 1 ] && [ "$git_ns" = "repo" ]
+		then
+			(cd repo && test_commit commit) &&
+			if [ $bad_head -eq 1 ]
+			then
+				git -C repo symbolic-ref HEAD refs/heads/badbranch
+			fi
+		elif [ $local_ref -eq 1 ] && [ "$git_ns" = "wt" ]
+		then
+			test_when_finished "git -C repo worktree remove -f ../wt" &&
+			git -C repo worktree add --orphan -b main ../wt &&
+			(cd wt && test_commit commit) &&
+			if [ $bad_head -eq 1 ]
+			then
+				git -C wt symbolic-ref HEAD refs/heads/badbranch
+			fi
+		elif [ $local_ref -eq 0 ] && [ "$git_ns" = "wt" ]
+		then
+			test_when_finished "git -C repo worktree remove -f ../wt" &&
+			git -C repo worktree add --orphan -b orphanbranch ../wt
+		fi &&
+
+		if [ $remote -eq 1 ]
+		then
+			test_when_finished "rm -rf upstream" &&
+			git init upstream &&
+			(cd upstream && test_commit commit) &&
+			git -C upstream switch -c foo &&
+			git -C repo remote add upstream ../upstream
+		fi &&
+
+		if [ $remote_ref -eq 1 ]
+		then
+			git -C repo fetch
+		fi &&
+		if [ $success -eq 1 ]
+		then
+			test_when_finished git -C repo worktree remove ../foo
+		fi &&
+		(
+			if [ $use_cd -eq 1 ]
+			then
+				cd $git_ns
+			fi &&
+			if [ "$outcome" = "infer" ]
+			then
+				git $dashc_args worktree add $args 2>actual &&
+				if [ $use_quiet -eq 1 ]
+				then
+					test_must_be_empty actual
+				else
+					test_grep "$info_text" actual
+				fi
+			elif [ "$outcome" = "no_infer" ]
+			then
+				git $dashc_args worktree add $args 2>actual &&
+				if [ $use_quiet -eq 1 ]
+				then
+					test_must_be_empty actual
+				else
+					test_grep ! "$info_text" actual
+				fi
+			elif [ "$outcome" = "fetch_error" ]
+			then
+				test_must_fail git $dashc_args worktree add $args 2>actual &&
+				test_grep "$fetch_error_text" actual
+			elif [ "$outcome" = "fatal_orphan_bad_combo" ]
+			then
+				test_must_fail git $dashc_args worktree add $args 2>actual &&
+				if [ $use_quiet -eq 1 ]
+				then
+					test_grep ! "$info_text" actual
+				else
+					test_grep "$info_text" actual
+				fi &&
+				test_grep "$bad_combo_regex" actual
+			elif [ "$outcome" = "warn_bad_head" ]
+			then
+				test_must_fail git $dashc_args worktree add $args 2>actual &&
+				if [ $use_quiet -eq 1 ]
+				then
+					test_grep "$invalid_ref_regex" actual &&
+					test_grep ! "$orphan_hint" actual
+				else
+					test_grep "HEAD points to an invalid (or orphaned) reference" actual &&
+					test_grep "$orphan_hint" actual &&
+					test_grep ! "$info_text" actual
+				fi &&
+				test_grep "$invalid_ref_regex" actual
+			else
+				# Unreachable
+				false
+			fi
+		) &&
+		if [ $success -ne 1 ]
+		then
+			test_path_is_missing foo
+		fi
+	'
+}
+
+for quiet_mode in "no_quiet" "quiet"
+do
+	for changedir_type in "cd_repo" "cd_wt" "-C_repo" "-C_wt"
+	do
+		dwim_test_args="$quiet_mode $changedir_type"
+		test_dwim_orphan 'infer' $dwim_test_args no_-b
+		test_dwim_orphan 'no_infer' $dwim_test_args no_-b local_ref good_head
+		test_dwim_orphan 'infer' $dwim_test_args no_-b no_local_ref no_remote no_remote_ref no_guess_remote
+		test_dwim_orphan 'infer' $dwim_test_args no_-b no_local_ref remote no_remote_ref no_guess_remote
+		test_dwim_orphan 'fetch_error' $dwim_test_args no_-b no_local_ref remote no_remote_ref guess_remote
+		test_dwim_orphan 'infer' $dwim_test_args no_-b no_local_ref remote no_remote_ref guess_remote force
+		test_dwim_orphan 'no_infer' $dwim_test_args no_-b no_local_ref remote remote_ref guess_remote
+
+		test_dwim_orphan 'infer' $dwim_test_args -b
+		test_dwim_orphan 'no_infer' $dwim_test_args -b local_ref good_head
+		test_dwim_orphan 'infer' $dwim_test_args -b no_local_ref no_remote no_remote_ref no_guess_remote
+		test_dwim_orphan 'infer' $dwim_test_args -b no_local_ref remote no_remote_ref no_guess_remote
+		test_dwim_orphan 'infer' $dwim_test_args -b no_local_ref remote no_remote_ref guess_remote
+		test_dwim_orphan 'infer' $dwim_test_args -b no_local_ref remote remote_ref guess_remote
+
+		test_dwim_orphan 'warn_bad_head' $dwim_test_args no_-b local_ref bad_head
+		test_dwim_orphan 'warn_bad_head' $dwim_test_args -b local_ref bad_head
+		test_dwim_orphan 'warn_bad_head' $dwim_test_args detach local_ref bad_head
+	done
+
+	test_dwim_orphan 'fatal_orphan_bad_combo' $quiet_mode no_-b no_checkout
+	test_dwim_orphan 'fatal_orphan_bad_combo' $quiet_mode no_-b track
+	test_dwim_orphan 'fatal_orphan_bad_combo' $quiet_mode -b no_checkout
+	test_dwim_orphan 'fatal_orphan_bad_combo' $quiet_mode -b track
+done
 
 post_checkout_hook () {
 	test_when_finished "rm -rf .git/hooks" &&
@@ -653,7 +1201,7 @@ test_expect_success '"add" not tripped up by magic worktree matching"' '
 
 test_expect_success FUNNYNAMES 'sanitize generated worktree name' '
 	git worktree add --detach ".  weird*..?.lock.lock" &&
-	test -d .git/worktrees/---weird-.-
+	test_path_is_dir .git/worktrees/---weird-.-
 '
 
 test_expect_success '"add" should not fail because of another bad worktree' '
@@ -669,6 +1217,7 @@ test_expect_success '"add" should not fail because of another bad worktree' '
 '
 
 test_expect_success '"add" with uninitialized submodule, with submodule.recurse unset' '
+	test_config_global protocol.file.allow always &&
 	test_create_repo submodule &&
 	test_commit -C submodule first &&
 	test_create_repo project &&
@@ -684,12 +1233,59 @@ test_expect_success '"add" with uninitialized submodule, with submodule.recurse 
 '
 
 test_expect_success '"add" with initialized submodule, with submodule.recurse unset' '
+	test_config_global protocol.file.allow always &&
 	git -C project-clone submodule update --init &&
 	git -C project-clone worktree add ../project-4
 '
 
 test_expect_success '"add" with initialized submodule, with submodule.recurse set' '
 	git -C project-clone -c submodule.recurse worktree add ../project-5
+'
+
+test_expect_success 'can create worktrees with relative paths' '
+	test_when_finished "git worktree remove relative" &&
+	test_config worktree.useRelativePaths false &&
+	git worktree add --relative-paths ./relative &&
+	echo "gitdir: ../.git/worktrees/relative" >expect &&
+	test_cmp expect relative/.git &&
+	echo "../../../relative/.git" >expect &&
+	test_cmp expect .git/worktrees/relative/gitdir
+'
+
+test_expect_success 'can create worktrees with absolute paths' '
+	test_config worktree.useRelativePaths true &&
+	git worktree add ./relative &&
+	echo "gitdir: ../.git/worktrees/relative" >expect &&
+	test_cmp expect relative/.git &&
+	git worktree add --no-relative-paths ./absolute &&
+	echo "gitdir: $(pwd)/.git/worktrees/absolute" >expect &&
+	test_cmp expect absolute/.git &&
+	echo "$(pwd)/absolute/.git" >expect &&
+	test_cmp expect .git/worktrees/absolute/gitdir
+'
+
+test_expect_success 'move repo without breaking relative internal links' '
+	test_when_finished rm -rf repo moved &&
+	git init repo &&
+	(
+		cd repo &&
+		test_commit initial &&
+		git worktree add --relative-paths wt1 &&
+		cd .. &&
+		mv repo moved &&
+		cd moved/wt1 &&
+		git worktree list >out 2>err &&
+		test_must_be_empty err
+	)
+'
+
+test_expect_success 'relative worktree sets extension config' '
+	test_when_finished "rm -rf repo" &&
+	git init repo &&
+	git -C repo commit --allow-empty -m base &&
+	git -C repo worktree add --relative-paths ./foo &&
+	test_cmp_config -C repo 1 core.repositoryformatversion &&
+	test_cmp_config -C repo true extensions.relativeworktrees
 '
 
 test_done

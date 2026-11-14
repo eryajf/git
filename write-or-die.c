@@ -1,6 +1,7 @@
-#include "cache.h"
-#include "config.h"
+#include "git-compat-util.h"
+#include "parse.h"
 #include "run-command.h"
+#include "write-or-die.h"
 
 /*
  * Some cases use stdio, but want to flush after the write
@@ -17,22 +18,20 @@
  */
 void maybe_flush_or_die(FILE *f, const char *desc)
 {
-	static int skip_stdout_flush = -1;
-	struct stat st;
-	char *cp;
-
 	if (f == stdout) {
-		if (skip_stdout_flush < 0) {
-			cp = getenv("GIT_FLUSH");
-			if (cp)
-				skip_stdout_flush = (atoi(cp) == 0);
-			else if ((fstat(fileno(stdout), &st) == 0) &&
-				 S_ISREG(st.st_mode))
-				skip_stdout_flush = 1;
-			else
-				skip_stdout_flush = 0;
+		static int force_flush_stdout = -1;
+
+		if (force_flush_stdout < 0) {
+			force_flush_stdout = git_env_bool("GIT_FLUSH", -1);
+			if (force_flush_stdout < 0) {
+				struct stat st;
+				if (fstat(fileno(stdout), &st))
+					force_flush_stdout = 1;
+				else
+					force_flush_stdout = !S_ISREG(st.st_mode);
+			}
 		}
-		if (skip_stdout_flush && !ferror(f))
+		if (!force_flush_stdout && !ferror(f))
 			return;
 	}
 	if (fflush(f)) {
@@ -94,6 +93,14 @@ void write_or_die(int fd, const void *buf, size_t count)
 	if (write_in_full(fd, buf, count) < 0) {
 		check_pipe(errno);
 		die_errno("write error");
+	}
+}
+
+void writev_or_die(int fd, struct iovec *iov, int iovlen)
+{
+	if (writev_in_full(fd, iov, iovlen) < 0) {
+		check_pipe(errno);
+		die_errno("writev error");
 	}
 }
 

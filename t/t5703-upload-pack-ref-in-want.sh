@@ -83,18 +83,15 @@ test_expect_success 'setup repository' '
 
 test_expect_success 'config controls ref-in-want advertisement' '
 	test-tool serve-v2 --advertise-capabilities >out &&
-	perl -ne "/ref-in-want/ and print" out >out.filter &&
-	test_must_be_empty out.filter &&
+	test_grep ! "ref-in-want" out &&
 
 	git config uploadpack.allowRefInWant false &&
 	test-tool serve-v2 --advertise-capabilities >out &&
-	perl -ne "/ref-in-want/ and print" out >out.filter &&
-	test_must_be_empty out.filter &&
+	test_grep ! "ref-in-want" out &&
 
 	git config uploadpack.allowRefInWant true &&
 	test-tool serve-v2 --advertise-capabilities >out &&
-	perl -ne "/ref-in-want/ and print" out >out.filter &&
-	test_file_not_empty out.filter
+	test_grep "ref-in-want" out
 '
 
 test_expect_success 'invalid want-ref line' '
@@ -104,7 +101,7 @@ test_expect_success 'invalid want-ref line' '
 
 	test-tool pkt-line pack <pkt >in &&
 	test_must_fail test-tool serve-v2 --stateless-rpc 2>out <in &&
-	grep "unknown ref" out
+	test_grep "unknown ref" out
 '
 
 test_expect_success 'basic want-ref' '
@@ -229,18 +226,20 @@ test_expect_success 'setup repos for fetching with ref-in-want tests' '
 '
 
 test_expect_success 'fetching with exact OID' '
-	test_when_finished "rm -f log" &&
+	test_when_finished "rm -f log trace2" &&
 
 	rm -rf local &&
 	cp -r "$LOCAL_PRISTINE" local &&
 	oid=$(git -C "$REPO" rev-parse d) &&
-	GIT_TRACE_PACKET="$(pwd)/log" git -C local fetch origin \
+	GIT_TRACE_PACKET="$(pwd)/log" GIT_TRACE2_EVENT="$(pwd)/trace2" \
+		git -C local fetch origin \
 		"$oid":refs/heads/actual &&
 
+	test_grep \"key\":\"total_rounds\",\"value\":\"2\" trace2 &&
 	git -C "$REPO" rev-parse "d" >expected &&
 	git -C local rev-parse refs/heads/actual >actual &&
 	test_cmp expected actual &&
-	grep "want $oid" log
+	test_grep "want $oid" log
 '
 
 test_expect_success 'fetching multiple refs' '
@@ -253,8 +252,8 @@ test_expect_success 'fetching multiple refs' '
 	git -C "$REPO" rev-parse "main" "baz" >expected &&
 	git -C local rev-parse refs/remotes/origin/main refs/remotes/origin/baz >actual &&
 	test_cmp expected actual &&
-	grep "want-ref refs/heads/main" log &&
-	grep "want-ref refs/heads/baz" log
+	test_grep "want-ref refs/heads/main" log &&
+	test_grep "want-ref refs/heads/baz" log
 '
 
 test_expect_success 'fetching ref and exact OID' '
@@ -269,8 +268,8 @@ test_expect_success 'fetching ref and exact OID' '
 	git -C "$REPO" rev-parse "main" "b" >expected &&
 	git -C local rev-parse refs/remotes/origin/main refs/heads/actual >actual &&
 	test_cmp expected actual &&
-	grep "want $oid" log &&
-	grep "want-ref refs/heads/main" log
+	test_grep "want $oid" log &&
+	test_grep "want-ref refs/heads/main" log
 '
 
 test_expect_success 'fetching with wildcard that does not match any refs' '
@@ -292,8 +291,26 @@ test_expect_success 'fetching with wildcard that matches multiple refs' '
 	git -C "$REPO" rev-parse "o/foo" "o/bar" >expected &&
 	git -C local rev-parse "o/foo" "o/bar" >actual &&
 	test_cmp expected actual &&
-	grep "want-ref refs/heads/o/foo" log &&
-	grep "want-ref refs/heads/o/bar" log
+	test_grep "want-ref refs/heads/o/foo" log &&
+	test_grep "want-ref refs/heads/o/bar" log
+'
+
+test_expect_success 'shallow clone with ref-in-want' '
+       rm -rf local &&
+       GIT_TEST_PROTOCOL_VERSION=2 git clone --depth=1 "file://$REPO" local &&
+       git -C "$REPO" rev-parse main >expected &&
+       git -C local rev-parse refs/remotes/origin/main >actual &&
+       test_cmp expected actual &&
+       git -C local log --oneline refs/remotes/origin/main >log &&
+       test_line_count = 1 log
+'
+
+test_expect_success 'incremental shallow fetch with ref-in-want' '
+       rm -rf local &&
+       GIT_TEST_PROTOCOL_VERSION=2 git clone --depth=1 "file://$REPO" local &&
+       GIT_TEST_PROTOCOL_VERSION=2 git -C local fetch --depth=2 origin main &&
+       git -C local log --oneline refs/remotes/origin/main >log &&
+       test_line_count = 2 log
 '
 
 REPO="$(pwd)/repo-ns"
@@ -346,7 +363,7 @@ test_expect_success 'with namespace: want-ref outside namespace is unknown' '
 
 	test_must_fail env GIT_NAMESPACE=ns \
 		test-tool -C "$REPO" serve-v2 --stateless-rpc >out <in &&
-	grep "unknown ref" out
+	test_grep "unknown ref" out
 '
 
 # Cross-check refs/heads/ns-no indeed exists
@@ -382,7 +399,7 @@ test_expect_success 'with namespace: hideRefs is matched, relative to namespace'
 
 	test_must_fail env GIT_NAMESPACE=ns \
 		test-tool -C "$REPO" serve-v2 --stateless-rpc >out <in &&
-	grep "unknown ref" out
+	test_grep "unknown ref" out
 '
 
 # Cross-check refs/heads/hidden indeed exists
@@ -460,7 +477,7 @@ test_expect_success 'setup repos for change-while-negotiating test' '
 		test_commit m3 &&
 		git tag -d m2 m3
 	) &&
-	git -C "$LOCAL_PRISTINE" remote set-url origin "http://127.0.0.1:$LIB_HTTPD_PORT/one_time_perl/repo" &&
+	git -C "$LOCAL_PRISTINE" remote set-url origin "http://127.0.0.1:$LIB_HTTPD_PORT/one_time_script/repo" &&
 	git -C "$LOCAL_PRISTINE" config protocol.version 2
 '
 
@@ -473,19 +490,21 @@ inconsistency () {
 	# RPCs during a single negotiation.
 	oid1=$(git -C "$REPO" rev-parse $1) &&
 	oid2=$(git -C "$REPO" rev-parse $2) &&
-	echo "s/$oid1/$oid2/" >"$HTTPD_ROOT_PATH/one-time-perl"
+	write_script "$HTTPD_ROOT_PATH/one-time-script" <<-EOF
+	sed "s/$oid1/$oid2/" "\$1"
+	EOF
 }
 
-test_expect_success 'server is initially ahead - no ref in want' '
+test_expect_success PERL_TEST_HELPERS 'server is initially ahead - no ref in want' '
 	git -C "$REPO" config uploadpack.allowRefInWant false &&
 	rm -rf local &&
 	cp -r "$LOCAL_PRISTINE" local &&
 	inconsistency main $(test_oid numeric) &&
 	test_must_fail git -C local fetch 2>err &&
-	test_i18ngrep "fatal: remote error: upload-pack: not our ref" err
+	test_grep "fatal: remote error: upload-pack: not our ref" err
 '
 
-test_expect_success 'server is initially ahead - ref in want' '
+test_expect_success PERL_TEST_HELPERS 'server is initially ahead - ref in want' '
 	git -C "$REPO" config uploadpack.allowRefInWant true &&
 	rm -rf local &&
 	cp -r "$LOCAL_PRISTINE" local &&
@@ -497,7 +516,7 @@ test_expect_success 'server is initially ahead - ref in want' '
 	test_cmp expected actual
 '
 
-test_expect_success 'server is initially behind - no ref in want' '
+test_expect_success PERL_TEST_HELPERS 'server is initially behind - no ref in want' '
 	git -C "$REPO" config uploadpack.allowRefInWant false &&
 	rm -rf local &&
 	cp -r "$LOCAL_PRISTINE" local &&
@@ -509,7 +528,7 @@ test_expect_success 'server is initially behind - no ref in want' '
 	test_cmp expected actual
 '
 
-test_expect_success 'server is initially behind - ref in want' '
+test_expect_success PERL_TEST_HELPERS 'server is initially behind - ref in want' '
 	git -C "$REPO" config uploadpack.allowRefInWant true &&
 	rm -rf local &&
 	cp -r "$LOCAL_PRISTINE" local &&
@@ -521,14 +540,16 @@ test_expect_success 'server is initially behind - ref in want' '
 	test_cmp expected actual
 '
 
-test_expect_success 'server loses a ref - ref in want' '
+test_expect_success PERL_TEST_HELPERS 'server loses a ref - ref in want' '
 	git -C "$REPO" config uploadpack.allowRefInWant true &&
 	rm -rf local &&
 	cp -r "$LOCAL_PRISTINE" local &&
-	echo "s/main/rain/" >"$HTTPD_ROOT_PATH/one-time-perl" &&
+	write_script "$HTTPD_ROOT_PATH/one-time-script" <<-\EOF &&
+	sed "s/main/rain/" "$1"
+	EOF
 	test_must_fail git -C local fetch 2>err &&
 
-	test_i18ngrep "fatal: remote error: unknown ref refs/heads/rain" err
+	test_grep "fatal: remote error: unknown ref refs/heads/rain" err
 '
 
 # DO NOT add non-httpd-specific tests here, because the last part of this

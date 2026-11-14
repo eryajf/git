@@ -6,7 +6,6 @@ Tests whether various commands properly update and/or rewrite the
 cache-tree extension.
 "
 
-TEST_PASSES_SANITIZE_LEAK=true
  . ./test-lib.sh
 
 cmp_cache_tree () {
@@ -129,7 +128,7 @@ test_expect_success 'second commit has cache-tree' '
 	test_cache_tree
 '
 
-test_expect_success PERL 'commit --interactive gives cache-tree on partial commit' '
+test_expect_success 'commit --interactive gives cache-tree on partial commit' '
 	test_when_finished "git reset --hard" &&
 	cat <<-\EOT >foo.c &&
 	int foo()
@@ -163,7 +162,7 @@ test_expect_success PERL 'commit --interactive gives cache-tree on partial commi
 	test_cache_tree expected.status
 '
 
-test_expect_success PERL 'commit -p with shrinking cache-tree' '
+test_expect_success 'commit -p with shrinking cache-tree' '
 	mkdir -p deep/very-long-subdir &&
 	echo content >deep/very-long-subdir/file &&
 	git add deep &&
@@ -277,6 +276,27 @@ test_expect_success 'switching trees does not invalidate shared index' '
 		test-tool dump-split-index .git/index | grep -v ^own >after &&
 		test_cmp before after
 	)
+'
+
+test_expect_success 'cache-tree is used by write-tree when valid' '
+	test_commit use-valid &&
+
+	# write-tree with a valid cache-tree should skip cache_tree_update
+	GIT_TRACE2_PERF="$(pwd)/trace.output" git write-tree &&
+	test_grep ! region_enter.*cache_tree.*update trace.output
+'
+
+test_expect_success 'write-tree succeeds while the index is locked' '
+	test_when_finished "rm -f .git/index.lock" &&
+	test_commit locked &&
+	>uncommitted &&
+	git add uncommitted &&
+	>.git/index.lock &&
+	git write-tree >actual &&
+	test_path_is_file .git/index.lock &&
+	rm .git/index.lock &&
+	git write-tree >expect &&
+	test_cmp expect actual
 '
 
 test_done

@@ -7,9 +7,12 @@
  * files. Useful when you write a file that you want to be
  * able to verify hasn't been messed with afterwards.
  */
-#include "cache.h"
-#include "progress.h"
+
+#include "git-compat-util.h"
 #include "csum-file.h"
+#include "git-zlib.h"
+#include "hash.h"
+#include "progress.h"
 
 static void verify_buffer_or_die(struct hashfile *f,
 				 const void *buf,
@@ -19,7 +22,7 @@ static void verify_buffer_or_die(struct hashfile *f,
 
 	if (ret < 0)
 		die_errno("%s: sha1 file read error", f->name);
-	if (ret != count)
+	if ((size_t)ret != count)
 		die("%s: sha1 file truncated", f->name);
 	if (memcmp(buf, f->check_buffer, count))
 		die("sha1 file '%s' validation error", f->name);
@@ -45,14 +48,16 @@ void hashflush(struct hashfile *f)
 	unsigned offset = f->offset;
 
 	if (offset) {
-		the_hash_algo->update_fn(&f->ctx, f->buffer, offset);
+		if (!f->skip_hash)
+			git_hash_update(&f->ctx, f->buffer, offset);
 		flush(f, f->buffer, offset);
 		f->offset = 0;
 	}
 }
 
-static void free_hashfile(struct hashfile *f)
+void free_hashfile(struct hashfile *f)
 {
+	git_hash_discard(&f->ctx);
 	free(f->buffer);
 	free(f->check_buffer);
 	free(f);
@@ -64,11 +69,16 @@ int finalize_hashfile(struct hashfile *f, unsigned char *result,
 	int fd;
 
 	hashflush(f);
-	the_hash_algo->final_fn(f->buffer, &f->ctx);
+
+	if (f->skip_hash)
+		hashclr(f->buffer, f->algop);
+	else
+		git_hash_final(f->buffer, &f->ctx);
+
 	if (result)
-		hashcpy(result, f->buffer);
+		hashcpy(result, f->buffer, f->algop);
 	if (flags & CSUM_HASH_IN_STREAM)
-		flush(f, f->buffer, the_hash_algo->rawsz);
+		flush(f, f->buffer, f->algop->rawsz);
 	if (flags & CSUM_FSYNC)
 		fsync_component_or_die(component, f->fd, f->name);
 	if (flags & CSUM_CLOSE) {
@@ -92,7 +102,7 @@ int finalize_hashfile(struct hashfile *f, unsigned char *result,
 	return fd;
 }
 
-void hashwrite(struct hashfile *f, const void *buf, unsigned int count)
+void hashwrite(struct hashfile *f, const void *buf, uint32_t count)
 {
 	while (count) {
 		unsigned left = f->buffer_len - f->offset;
@@ -108,7 +118,8 @@ void hashwrite(struct hashfile *f, const void *buf, unsigned int count)
 			 * the hashfile's buffer. In this block,
 			 * f->offset is necessarily zero.
 			 */
-			the_hash_algo->update_fn(&f->ctx, buf, nr);
+			if (!f->skip_hash)
+				git_hash_update(&f->ctx, buf, nr);
 			flush(f, buf, nr);
 		} else {
 			/*
@@ -127,67 +138,69 @@ void hashwrite(struct hashfile *f, const void *buf, unsigned int count)
 	}
 }
 
-struct hashfile *hashfd_check(const char *name)
+struct hashfile *hashfd_check(const struct git_hash_algo *algop,
+			      const char *name)
 {
 	int sink, check;
 	struct hashfile *f;
 
 	sink = xopen("/dev/null", O_WRONLY);
 	check = xopen(name, O_RDONLY);
-	f = hashfd(sink, name);
+	f = hashfd(algop, sink, name);
 	f->check_fd = check;
 	f->check_buffer = xmalloc(f->buffer_len);
 
 	return f;
 }
 
-static struct hashfile *hashfd_internal(int fd, const char *name,
-					struct progress *tp,
-					size_t buffer_len)
+struct hashfile *hashfd_ext(const struct git_hash_algo *algop,
+			    int fd, const char *name,
+			    const struct hashfd_options *opts)
 {
 	struct hashfile *f = xmalloc(sizeof(*f));
 	f->fd = fd;
 	f->check_fd = -1;
 	f->offset = 0;
 	f->total = 0;
-	f->tp = tp;
+	f->tp = opts->progress;
 	f->name = name;
 	f->do_crc = 0;
-	the_hash_algo->init_fn(&f->ctx);
+	f->skip_hash = 0;
 
-	f->buffer_len = buffer_len;
-	f->buffer = xmalloc(buffer_len);
+	f->algop = unsafe_hash_algo(algop);
+	git_hash_init(&f->ctx, f->algop);
+
+	f->buffer_len = opts->buffer_len ? opts->buffer_len : DEFAULT_IO_BUFFER_SIZE;
+	f->buffer = xmalloc(f->buffer_len);
 	f->check_buffer = NULL;
 
 	return f;
 }
 
-struct hashfile *hashfd(int fd, const char *name)
+struct hashfile *hashfd(const struct git_hash_algo *algop,
+			int fd, const char *name)
 {
 	/*
 	 * Since we are not going to use a progress meter to
 	 * measure the rate of data passing through this hashfile,
 	 * use a larger buffer size to reduce fsync() calls.
 	 */
-	return hashfd_internal(fd, name, NULL, 128 * 1024);
+	struct hashfd_options opts = { 0 };
+	return hashfd_ext(algop, fd, name, &opts);
 }
 
-struct hashfile *hashfd_throughput(int fd, const char *name, struct progress *tp)
+void hashfile_checkpoint_init(struct hashfile *f,
+			      struct hashfile_checkpoint *checkpoint)
 {
-	/*
-	 * Since we are expecting to report progress of the
-	 * write into this hashfile, use a smaller buffer
-	 * size so the progress indicators arrive at a more
-	 * frequent rate.
-	 */
-	return hashfd_internal(fd, name, tp, 8 * 1024);
+	memset(checkpoint, 0, sizeof(*checkpoint));
+	git_hash_init(&checkpoint->ctx, f->algop);
 }
 
 void hashfile_checkpoint(struct hashfile *f, struct hashfile_checkpoint *checkpoint)
 {
 	hashflush(f);
 	checkpoint->offset = f->total;
-	the_hash_algo->clone_fn(&checkpoint->ctx, &f->ctx);
+	git_hash_clone(&checkpoint->ctx, &f->ctx);
 }
 
 int hashfile_truncate(struct hashfile *f, struct hashfile_checkpoint *checkpoint)
@@ -198,9 +211,14 @@ int hashfile_truncate(struct hashfile *f, struct hashfile_checkpoint *checkpoint
 	    lseek(f->fd, offset, SEEK_SET) != offset)
 		return -1;
 	f->total = offset;
-	f->ctx = checkpoint->ctx;
+	git_hash_clone(&f->ctx, &checkpoint->ctx);
 	f->offset = 0; /* hashflush() was called in checkpoint */
 	return 0;
+}
+
+void hashfile_checkpoint_release(struct hashfile_checkpoint *checkpoint)
+{
+	git_hash_discard(&checkpoint->ctx);
 }
 
 void crc32_begin(struct hashfile *f)
@@ -215,18 +233,21 @@ uint32_t crc32_end(struct hashfile *f)
 	return f->crc32;
 }
 
-int hashfile_checksum_valid(const unsigned char *data, size_t total_len)
+int hashfile_checksum_valid(const struct git_hash_algo *algop,
+			    const unsigned char *data, size_t total_len)
 {
 	unsigned char got[GIT_MAX_RAWSZ];
-	git_hash_ctx ctx;
-	size_t data_len = total_len - the_hash_algo->rawsz;
+	struct git_hash_ctx ctx;
+	size_t data_len = total_len - algop->rawsz;
 
-	if (total_len < the_hash_algo->rawsz)
+	algop = unsafe_hash_algo(algop);
+
+	if (total_len < algop->rawsz)
 		return 0; /* say "too short"? */
 
-	the_hash_algo->init_fn(&ctx);
-	the_hash_algo->update_fn(&ctx, data, data_len);
-	the_hash_algo->final_fn(got, &ctx);
+	git_hash_init(&ctx, algop);
+	git_hash_update(&ctx, data, data_len);
+	git_hash_final(got, &ctx);
 
-	return hasheq(got, data + data_len);
+	return hasheq(got, data + data_len, algop);
 }

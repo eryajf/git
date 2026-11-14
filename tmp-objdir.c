@@ -1,24 +1,34 @@
-#include "cache.h"
+#include "git-compat-util.h"
 #include "tmp-objdir.h"
+#include "abspath.h"
 #include "chdir-notify.h"
 #include "dir.h"
-#include "sigchain.h"
+#include "environment.h"
+#include "loose.h"
+#include "object-file.h"
+#include "path.h"
 #include "string-list.h"
 #include "strbuf.h"
 #include "strvec.h"
 #include "quote.h"
-#include "object-store.h"
+#include "odb.h"
+#include "odb/source.h"
+#include "odb/source-files.h"
+#include "odb/source-loose.h"
+#include "repository.h"
 
 struct tmp_objdir {
+	struct repository *repo;
 	struct strbuf path;
 	struct strvec env;
-	struct object_directory *prev_odb;
+	struct odb_files_dir *temp_dir;
+	struct odb_files_dir *orig_dir;
 	int will_destroy;
 };
 
 /*
  * Allow only one tmp_objdir at a time in a running process, which simplifies
- * our signal/atexit cleanup routines.  It's doubtful callers will ever need
+ * our atexit cleanup routines.  It's doubtful callers will ever need
  * more than one, and we can expand later if so.  You can have many such
  * tmp_objdirs simultaneously in many processes, of course.
  */
@@ -31,7 +41,42 @@ static void tmp_objdir_free(struct tmp_objdir *t)
 	free(t);
 }
 
-static int tmp_objdir_destroy_1(struct tmp_objdir *t, int on_signal)
+static void tmp_objdir_reparent(const char *old_cwd,
+				const char *new_cwd,
+				void *cb_data)
+{
+	struct tmp_objdir *t = cb_data;
+	char *path;
+
+	path = reparent_relative_path(old_cwd, new_cwd,
+				      t->path.buf);
+	strbuf_reset(&t->path);
+	strbuf_addstr(&t->path, path);
+	free(path);
+}
+
+/*
+ * Restore the primary source that was previously replaced by
+ * `tmp_objdir_create()`.
+ */
+static void tmp_objdir_restore_source(struct tmp_objdir *t)
+{
+	struct odb_source_files *files = odb_source_files_downcast(t->repo->objects->source);
+	struct odb_files_dir *cur_dir = files->dirs;
+
+	if (t->temp_dir != files->dirs)
+		BUG("expected %s as primary object store; found %s",
+		    t->temp_dir->abspath, cur_dir->abspath);
+
+	if (t->temp_dir->next != t->orig_dir)
+		BUG("we expect the old primary object store to be the first alternate");
+
+	t->repo->disable_ref_updates = false;
+	files->dirs = t->orig_dir;
+	odb_files_dir_free(cur_dir);
+}
+
+int tmp_objdir_destroy(struct tmp_objdir *t)
 {
 	int err;
 
@@ -41,42 +86,20 @@ static int tmp_objdir_destroy_1(struct tmp_objdir *t, int on_signal)
 	if (t == the_tmp_objdir)
 		the_tmp_objdir = NULL;
 
-	if (!on_signal && t->prev_odb)
-		restore_primary_odb(t->prev_odb, t->path.buf);
+	if (t->orig_dir)
+		tmp_objdir_restore_source(t);
 
-	/*
-	 * This may use malloc via strbuf_grow(), but we should
-	 * have pre-grown t->path sufficiently so that this
-	 * doesn't happen in practice.
-	 */
 	err = remove_dir_recursively(&t->path, 0);
 
-	/*
-	 * When we are cleaning up due to a signal, we won't bother
-	 * freeing memory; it may cause a deadlock if the signal
-	 * arrived while libc's allocator lock is held.
-	 */
-	if (!on_signal)
-		tmp_objdir_free(t);
+	chdir_notify_unregister(tmp_objdir_reparent, t);
+	tmp_objdir_free(t);
 
 	return err;
-}
-
-int tmp_objdir_destroy(struct tmp_objdir *t)
-{
-	return tmp_objdir_destroy_1(t, 0);
 }
 
 static void remove_tmp_objdir(void)
 {
 	tmp_objdir_destroy(the_tmp_objdir);
-}
-
-static void remove_tmp_objdir_on_signal(int signo)
-{
-	tmp_objdir_destroy_1(the_tmp_objdir, 1);
-	sigchain_pop(signo);
-	raise(signo);
 }
 
 void tmp_objdir_discard_objects(struct tmp_objdir *t)
@@ -133,8 +156,11 @@ static int setup_tmp_objdir(const char *root)
 	return ret;
 }
 
-struct tmp_objdir *tmp_objdir_create(const char *prefix)
+struct tmp_objdir *tmp_objdir_create(struct repository *r,
+				     const char *prefix,
+				     int will_destroy)
 {
+	struct odb_source_files *files = odb_source_files_downcast(r->objects->source);
 	static int installed_handlers;
 	struct tmp_objdir *t;
 
@@ -142,6 +168,8 @@ struct tmp_objdir *tmp_objdir_create(const char *prefix)
 		BUG("only one tmp_objdir can be used at a time");
 
 	t = xcalloc(1, sizeof(*t));
+	t->repo = r;
+	t->will_destroy = will_destroy;
 	strbuf_init(&t->path, 0);
 	strvec_init(&t->env);
 
@@ -150,15 +178,11 @@ struct tmp_objdir *tmp_objdir_create(const char *prefix)
 	 * can recognize any stale objdirs left behind by a crash and delete
 	 * them.
 	 */
-	strbuf_addf(&t->path, "%s/tmp_objdir-%s-XXXXXX", get_object_directory(), prefix);
+	strbuf_addf(&t->path, "%s/tmp_objdir-%s-XXXXXX",
+		    repo_get_object_directory(r), prefix);
 
-	/*
-	 * Grow the strbuf beyond any filename we expect to be placed in it.
-	 * If tmp_objdir_destroy() is called by a signal handler, then
-	 * we should be able to use the strbuf to remove files without
-	 * having to call malloc.
-	 */
-	strbuf_grow(&t->path, 1024);
+	if (!is_absolute_path(t->path.buf))
+		chdir_notify_register(tmp_objdir_reparent, t);
 
 	if (!mkdtemp(t->path.buf)) {
 		/* free, not destroy, as we never touched the filesystem */
@@ -169,7 +193,6 @@ struct tmp_objdir *tmp_objdir_create(const char *prefix)
 	the_tmp_objdir = t;
 	if (!installed_handlers) {
 		atexit(remove_tmp_objdir);
-		sigchain_push_common(remove_tmp_objdir_on_signal);
 		installed_handlers++;
 	}
 
@@ -179,10 +202,23 @@ struct tmp_objdir *tmp_objdir_create(const char *prefix)
 	}
 
 	env_append(&t->env, ALTERNATE_DB_ENVIRONMENT,
-		   absolute_path(get_object_directory()));
+		   absolute_path(repo_get_object_directory(r)));
 	env_replace(&t->env, DB_ENVIRONMENT, absolute_path(t->path.buf));
 	env_replace(&t->env, GIT_QUARANTINE_ENVIRONMENT,
 		    absolute_path(t->path.buf));
+
+	/*
+	 * Make a new primary source and link the old primary source in as an
+	 * alternate. Disable ref updates while a temporary source is active,
+	 * since the objects in the database may roll back.
+	 */
+	t->temp_dir = odb_files_dir_new(t->repo->objects, t->path.buf, false);
+	t->temp_dir->loose->will_destroy = will_destroy;
+	t->temp_dir->next = files->dirs;
+
+	t->orig_dir = files->dirs;
+	files->dirs = t->temp_dir;
+	t->repo->disable_ref_updates = true;
 
 	return t;
 }
@@ -231,9 +267,13 @@ static int read_dir_paths(struct string_list *out, const char *path)
 	return 0;
 }
 
-static int migrate_paths(struct strbuf *src, struct strbuf *dst);
+static int migrate_paths(struct tmp_objdir *t,
+			 struct strbuf *src, struct strbuf *dst,
+			 enum finalize_object_file_flags flags);
 
-static int migrate_one(struct strbuf *src, struct strbuf *dst)
+static int migrate_one(struct tmp_objdir *t,
+		       struct strbuf *src, struct strbuf *dst,
+		       enum finalize_object_file_flags flags)
 {
 	struct stat st;
 
@@ -241,20 +281,31 @@ static int migrate_one(struct strbuf *src, struct strbuf *dst)
 		return -1;
 	if (S_ISDIR(st.st_mode)) {
 		if (!mkdir(dst->buf, 0777)) {
-			if (adjust_shared_perm(dst->buf))
+			if (adjust_shared_perm(t->repo, dst->buf))
 				return -1;
 		} else if (errno != EEXIST)
 			return -1;
-		return migrate_paths(src, dst);
+		return migrate_paths(t, src, dst, flags);
 	}
-	return finalize_object_file(src->buf, dst->buf);
+	return finalize_object_file_flags(t->repo, src->buf, dst->buf, flags);
 }
 
-static int migrate_paths(struct strbuf *src, struct strbuf *dst)
+static int is_loose_object_shard(const char *name)
+{
+	return strlen(name) == 2 && isxdigit(name[0]) && isxdigit(name[1]);
+}
+
+static int is_loose_object_idx(const char *name)
+{
+	return !strcmp(name, "loose-object-idx");
+}
+
+static int migrate_paths(struct tmp_objdir *t,
+			 struct strbuf *src, struct strbuf *dst,
+			 enum finalize_object_file_flags flags)
 {
 	size_t src_len = src->len, dst_len = dst->len;
 	struct string_list paths = STRING_LIST_INIT_DUP;
-	int i;
 	int ret = 0;
 
 	if (read_dir_paths(&paths, src->buf) < 0)
@@ -262,13 +313,20 @@ static int migrate_paths(struct strbuf *src, struct strbuf *dst)
 	paths.cmp = pack_copy_cmp;
 	string_list_sort(&paths);
 
-	for (i = 0; i < paths.nr; i++) {
+	for (size_t i = 0; i < paths.nr; i++) {
 		const char *name = paths.items[i].string;
+		enum finalize_object_file_flags flags_copy = flags;
 
 		strbuf_addf(src, "/%s", name);
 		strbuf_addf(dst, "/%s", name);
 
-		ret |= migrate_one(src, dst);
+		if (is_loose_object_shard(name))
+			flags_copy |= FOF_SKIP_COLLISION_CHECK;
+
+		if (is_loose_object_idx(name))
+			ret |= loose_object_idx_merge(t->repo, src->buf, dst->buf);
+		else
+			ret |= migrate_one(t, src, dst, flags_copy);
 
 		strbuf_setlen(src, src_len);
 		strbuf_setlen(dst, dst_len);
@@ -286,17 +344,17 @@ int tmp_objdir_migrate(struct tmp_objdir *t)
 	if (!t)
 		return 0;
 
-	if (t->prev_odb) {
-		if (the_repository->objects->odb->will_destroy)
+	if (t->orig_dir) {
+		if (t->will_destroy)
 			BUG("migrating an ODB that was marked for destruction");
-		restore_primary_odb(t->prev_odb, t->path.buf);
-		t->prev_odb = NULL;
+		tmp_objdir_restore_source(t);
+		t->orig_dir = NULL;
 	}
 
 	strbuf_addbuf(&src, &t->path);
-	strbuf_addstr(&dst, get_object_directory());
+	strbuf_addstr(&dst, repo_get_object_directory(t->repo));
 
-	ret = migrate_paths(&src, &dst);
+	ret = migrate_paths(t, &src, &dst, 0);
 
 	strbuf_release(&src);
 	strbuf_release(&dst);
@@ -310,39 +368,4 @@ const char **tmp_objdir_env(const struct tmp_objdir *t)
 	if (!t)
 		return NULL;
 	return t->env.v;
-}
-
-void tmp_objdir_add_as_alternate(const struct tmp_objdir *t)
-{
-	add_to_alternates_memory(t->path.buf);
-}
-
-void tmp_objdir_replace_primary_odb(struct tmp_objdir *t, int will_destroy)
-{
-	if (t->prev_odb)
-		BUG("the primary object database is already replaced");
-	t->prev_odb = set_temporary_primary_odb(t->path.buf, will_destroy);
-	t->will_destroy = will_destroy;
-}
-
-struct tmp_objdir *tmp_objdir_unapply_primary_odb(void)
-{
-	if (!the_tmp_objdir || !the_tmp_objdir->prev_odb)
-		return NULL;
-
-	restore_primary_odb(the_tmp_objdir->prev_odb, the_tmp_objdir->path.buf);
-	the_tmp_objdir->prev_odb = NULL;
-	return the_tmp_objdir;
-}
-
-void tmp_objdir_reapply_primary_odb(struct tmp_objdir *t, const char *old_cwd,
-		const char *new_cwd)
-{
-	char *path;
-
-	path = reparent_relative_path(old_cwd, new_cwd, t->path.buf);
-	strbuf_reset(&t->path);
-	strbuf_addstr(&t->path, path);
-	free(path);
-	tmp_objdir_replace_primary_odb(t, t->will_destroy);
 }

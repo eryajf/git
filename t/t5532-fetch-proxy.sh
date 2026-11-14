@@ -2,8 +2,13 @@
 
 test_description='fetching via git:// using core.gitproxy'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
+
+if ! test_have_prereq PERL_TEST_HELPERS
+then
+	skip_all='skipping fetch proxy tests; Perl not available'
+	test_done
+fi
 
 test_expect_success 'setup remote repo' '
 	git init remote &&
@@ -47,7 +52,7 @@ test_expect_success 'fetch through proxy works' '
 
 test_expect_success 'funny hostnames are rejected before running proxy' '
 	test_must_fail git fetch git://-remote/repo.git 2>stderr &&
-	! grep "proxying for" stderr
+	test_grep ! "proxying for" stderr
 '
 
 test_done

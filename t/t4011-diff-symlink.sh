@@ -7,19 +7,18 @@ test_description='Test diff of symlinks.
 
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-diff.sh
 
 # Print the short OID of a symlink with the given name.
 symlink_oid () {
-	local oid=$(printf "%s" "$1" | git hash-object --stdin) &&
+	local oid="$(printf "%s" "$1" | git hash-object --stdin)" &&
 	git rev-parse --short "$oid"
 }
 
 # Print the short OID of the given file.
 short_oid () {
-	local oid=$(git hash-object "$1") &&
+	local oid="$(git hash-object "$1")" &&
 	git rev-parse --short "$oid"
 }
 
@@ -141,7 +140,7 @@ test_expect_success SYMLINKS 'diff symlinks with non-existing targets' '
 	ln -s narf pinky &&
 	ln -s take\ over brain &&
 	test_must_fail git diff --no-index pinky brain >output 2>output.err &&
-	grep narf output &&
+	test_grep narf output &&
 	test_must_be_empty output.err
 '
 

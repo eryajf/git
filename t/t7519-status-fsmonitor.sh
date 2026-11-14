@@ -63,19 +63,19 @@ test_expect_success 'incompatible bare repo' '
 	test_must_fail \
 		git -C ./bare-clone -c core.fsmonitor=foo \
 			update-index --fsmonitor 2>actual &&
-	grep "bare repository .* is incompatible with fsmonitor" actual &&
+	test_grep "bare repository .* is incompatible with fsmonitor" actual &&
 
 	test_must_fail \
 		git -C ./bare-clone -c core.fsmonitor=true \
 			update-index --fsmonitor 2>actual &&
-	grep "bare repository .* is incompatible with fsmonitor" actual
+	test_grep "bare repository .* is incompatible with fsmonitor" actual
 '
 
 test_expect_success FSMONITOR_DAEMON 'run fsmonitor-daemon in bare repo' '
 	test_when_finished "rm -rf ./bare-clone actual" &&
 	git init --bare bare-clone &&
 	test_must_fail git -C ./bare-clone fsmonitor--daemon run 2>actual &&
-	grep "bare repository .* is incompatible with fsmonitor" actual
+	test_grep "bare repository .* is incompatible with fsmonitor" actual
 '
 
 test_expect_success MINGW,FSMONITOR_DAEMON 'run fsmonitor-daemon in virtual repo' '
@@ -84,7 +84,7 @@ test_expect_success MINGW,FSMONITOR_DAEMON 'run fsmonitor-daemon in virtual repo
 	test_must_fail git -C ./fake-virtual-clone \
 			   -c core.virtualfilesystem=true \
 			   fsmonitor--daemon run 2>actual &&
-	grep "virtual repository .* is incompatible with fsmonitor" actual
+	test_grep "virtual repository .* is incompatible with fsmonitor" actual
 '
 
 test_expect_success 'setup' '
@@ -111,21 +111,21 @@ test_expect_success 'setup' '
 # test that the fsmonitor extension is off by default
 test_expect_success 'fsmonitor extension is off by default' '
 	test-tool dump-fsmonitor >actual &&
-	grep "^no fsmonitor" actual
+	test_grep "^no fsmonitor" actual
 '
 
 # test that "update-index --fsmonitor" adds the fsmonitor extension
 test_expect_success 'update-index --fsmonitor" adds the fsmonitor extension' '
 	git update-index --fsmonitor &&
 	test-tool dump-fsmonitor >actual &&
-	grep "^fsmonitor last update" actual
+	test_grep "^fsmonitor last update" actual
 '
 
 # test that "update-index --no-fsmonitor" removes the fsmonitor extension
 test_expect_success 'update-index --no-fsmonitor" removes the fsmonitor extension' '
 	git update-index --no-fsmonitor &&
 	test-tool dump-fsmonitor >actual &&
-	grep "^no fsmonitor" actual
+	test_grep "^no fsmonitor" actual
 '
 
 cat >expect <<EOF &&
@@ -322,14 +322,14 @@ do
 			rm -f marker &&
 			git status >actual &&
 			test_path_is_file marker &&
-			test_i18ngrep ! "Changes not staged for commit:" actual &&
+			test_grep ! "Changes not staged for commit:" actual &&
 			if test $uc_val = true
 			then
-				test_i18ngrep ! "Untracked files:" actual
+				test_grep ! "Untracked files:" actual
 			fi &&
 			if test $uc_val = false
 			then
-				test_i18ngrep "Untracked files:" actual
+				test_grep "Untracked files:" actual
 			fi &&
 			rm -f marker
 		'

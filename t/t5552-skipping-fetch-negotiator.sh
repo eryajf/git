@@ -1,7 +1,24 @@
 #!/bin/sh
 
 test_description='test skipping fetch negotiator'
+
 . ./test-lib.sh
+
+test_expect_success 'fetch.negotiationalgorithm config' '
+	test_when_finished "rm -rf repo" &&
+	git init repo &&
+	cat >repo/.git/config <<-\EOF &&
+	[fetch]
+	negotiationAlgorithm
+	EOF
+	cat >expect <<-\EOF &&
+	error: missing value for '\''fetch.negotiationalgorithm'\''
+	fatal: bad config variable '\''fetch.negotiationalgorithm'\'' in file '\''.git/config'\'' at line 2
+	EOF
+	test_expect_code 128 git -C repo fetch >out 2>actual &&
+	test_must_be_empty out &&
+	test_cmp expect actual
+'
 
 have_sent () {
 	while test "$#" -ne 0
@@ -184,7 +201,7 @@ test_expect_success 'do not send "have" with ancestors of commits that server AC
 		export GIT_TEST_PROTOCOL_VERSION &&
 		trace_fetch client "$(pwd)/server" to_fetch
 	) &&
-	grep "  fetch" trace &&
+	test_grep "  fetch" trace &&
 
 	# fetch-pack sends 2 requests each containing 16 "have" lines before
 	# processing the first response. In these 2 requests, 4 commits from
@@ -194,8 +211,8 @@ test_expect_success 'do not send "have" with ancestors of commits that server AC
 
 	# While fetch-pack is processing the first response, it should read that
 	# the server ACKs b1.c19 and b1.c17.
-	grep "fetch< ACK $(git -C client rev-parse b1.c19) common" trace &&
-	grep "fetch< ACK $(git -C client rev-parse b1.c17) common" trace &&
+	test_grep "fetch< ACK $(git -C client rev-parse b1.c19) common" trace &&
+	test_grep "fetch< ACK $(git -C client rev-parse b1.c17) common" trace &&
 
 	# fetch-pack should thus not send any more commits in the b1 branch, but
 	# should still send the others (in this test, just check b2).

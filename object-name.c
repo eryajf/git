@@ -1,23 +1,35 @@
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
+#include "object-name.h"
+#include "advice.h"
 #include "config.h"
+#include "environment.h"
+#include "gettext.h"
+#include "hex.h"
 #include "tag.h"
 #include "commit.h"
 #include "tree.h"
-#include "blob.h"
 #include "tree-walk.h"
 #include "refs.h"
 #include "remote.h"
 #include "dir.h"
+#include "odb.h"
 #include "oid-array.h"
-#include "packfile.h"
-#include "object-store.h"
+#include "pretty.h"
+#include "read-cache-ll.h"
+#include "repo-settings.h"
 #include "repository.h"
-#include "submodule.h"
+#include "setup.h"
 #include "midx.h"
 #include "commit-reach.h"
 #include "date.h"
+#include "object-file-convert.h"
+#include "prio-queue.h"
 
-static int get_oid_oneline(struct repository *r, const char *, struct object_id *, struct commit_list *);
+static int get_oid_oneline(struct repository *r, const char *, struct object_id *,
+			   const struct commit_list *);
 
 typedef int (*disambiguate_hint_fn)(struct repository *, const struct object_id *, void *);
 
@@ -35,29 +47,29 @@ struct disambiguate_state {
 	unsigned candidate_ok:1;
 	unsigned disambiguate_fn_used:1;
 	unsigned ambiguous:1;
-	unsigned always_call_fn:1;
 };
 
-static void update_candidates(struct disambiguate_state *ds, const struct object_id *current)
+static int update_disambiguate_state(const struct object_id *current,
+				     struct object_info *oi UNUSED,
+				     void *cb_data)
 {
-	if (ds->always_call_fn) {
-		ds->ambiguous = ds->fn(ds->repo, current, ds->cb_data) ? 1 : 0;
-		return;
-	}
+	struct disambiguate_state *ds = cb_data;
+
+	/* The hash algorithm of current has already been filtered */
 	if (!ds->candidate_exists) {
 		/* this is the first candidate */
 		oidcpy(&ds->candidate, current);
 		ds->candidate_exists = 1;
-		return;
+		return 0;
 	} else if (oideq(&ds->candidate, current)) {
 		/* the same as what we already have seen */
-		return;
+		return 0;
 	}
 
 	if (!ds->fn) {
 		/* cannot disambiguate between ds->candidate and current */
 		ds->ambiguous = 1;
-		return;
+		return ds->ambiguous;
 	}
 
 	if (!ds->candidate_checked) {
@@ -70,7 +82,7 @@ static void update_candidates(struct disambiguate_state *ds, const struct object
 		/* discard the candidate; we know it does not satisfy fn */
 		oidcpy(&ds->candidate, current);
 		ds->candidate_checked = 0;
-		return;
+		return 0;
 	}
 
 	/* if we reach this point, we know ds->candidate satisfies fn */
@@ -81,110 +93,12 @@ static void update_candidates(struct disambiguate_state *ds, const struct object
 		 */
 		ds->candidate_ok = 0;
 		ds->ambiguous = 1;
+		return ds->ambiguous;
 	}
 
 	/* otherwise, current can be discarded and candidate is still good */
-}
 
-static int match_hash(unsigned, const unsigned char *, const unsigned char *);
-
-static enum cb_next match_prefix(const struct object_id *oid, void *arg)
-{
-	struct disambiguate_state *ds = arg;
-	/* no need to call match_hash, oidtree_each did prefix match */
-	update_candidates(ds, oid);
-	return ds->ambiguous ? CB_BREAK : CB_CONTINUE;
-}
-
-static void find_short_object_filename(struct disambiguate_state *ds)
-{
-	struct object_directory *odb;
-
-	for (odb = ds->repo->objects->odb; odb && !ds->ambiguous; odb = odb->next)
-		oidtree_each(odb_loose_cache(odb, &ds->bin_pfx),
-				&ds->bin_pfx, ds->len, match_prefix, ds);
-}
-
-static int match_hash(unsigned len, const unsigned char *a, const unsigned char *b)
-{
-	do {
-		if (*a != *b)
-			return 0;
-		a++;
-		b++;
-		len -= 2;
-	} while (len > 1);
-	if (len)
-		if ((*a ^ *b) & 0xf0)
-			return 0;
-	return 1;
-}
-
-static void unique_in_midx(struct multi_pack_index *m,
-			   struct disambiguate_state *ds)
-{
-	uint32_t num, i, first = 0;
-	const struct object_id *current = NULL;
-	num = m->num_objects;
-
-	if (!num)
-		return;
-
-	bsearch_midx(&ds->bin_pfx, m, &first);
-
-	/*
-	 * At this point, "first" is the location of the lowest object
-	 * with an object name that could match "bin_pfx".  See if we have
-	 * 0, 1 or more objects that actually match(es).
-	 */
-	for (i = first; i < num && !ds->ambiguous; i++) {
-		struct object_id oid;
-		current = nth_midxed_object_oid(&oid, m, i);
-		if (!match_hash(ds->len, ds->bin_pfx.hash, current->hash))
-			break;
-		update_candidates(ds, current);
-	}
-}
-
-static void unique_in_pack(struct packed_git *p,
-			   struct disambiguate_state *ds)
-{
-	uint32_t num, i, first = 0;
-
-	if (p->multi_pack_index)
-		return;
-
-	if (open_pack_index(p) || !p->num_objects)
-		return;
-
-	num = p->num_objects;
-	bsearch_pack(&ds->bin_pfx, p, &first);
-
-	/*
-	 * At this point, "first" is the location of the lowest object
-	 * with an object name that could match "bin_pfx".  See if we have
-	 * 0, 1 or more objects that actually match(es).
-	 */
-	for (i = first; i < num && !ds->ambiguous; i++) {
-		struct object_id oid;
-		nth_packed_object_id(&oid, p, i);
-		if (!match_hash(ds->len, ds->bin_pfx.hash, oid.hash))
-			break;
-		update_candidates(ds, &oid);
-	}
-}
-
-static void find_short_packed_object(struct disambiguate_state *ds)
-{
-	struct multi_pack_index *m;
-	struct packed_git *p;
-
-	for (m = get_multi_pack_index(ds->repo); m && !ds->ambiguous;
-	     m = m->next)
-		unique_in_midx(m, ds);
-	for (p = get_packed_git(ds->repo); p && !ds->ambiguous;
-	     p = p->next)
-		unique_in_pack(p, ds);
+	return 0;
 }
 
 static int finish_object_disambiguation(struct disambiguate_state *ds,
@@ -223,20 +137,20 @@ static int finish_object_disambiguation(struct disambiguate_state *ds,
 
 static int disambiguate_commit_only(struct repository *r,
 				    const struct object_id *oid,
-				    void *cb_data_unused)
+				    void *cb_data UNUSED)
 {
-	int kind = oid_object_info(r, oid, NULL);
+	int kind = odb_read_object_info(r->objects, oid, NULL);
 	return kind == OBJ_COMMIT;
 }
 
 static int disambiguate_committish_only(struct repository *r,
 					const struct object_id *oid,
-					void *cb_data_unused)
+					void *cb_data UNUSED)
 {
 	struct object *obj;
 	int kind;
 
-	kind = oid_object_info(r, oid, NULL);
+	kind = odb_read_object_info(r->objects, oid, NULL);
 	if (kind == OBJ_COMMIT)
 		return 1;
 	if (kind != OBJ_TAG)
@@ -251,20 +165,20 @@ static int disambiguate_committish_only(struct repository *r,
 
 static int disambiguate_tree_only(struct repository *r,
 				  const struct object_id *oid,
-				  void *cb_data_unused)
+				  void *cb_data UNUSED)
 {
-	int kind = oid_object_info(r, oid, NULL);
+	int kind = odb_read_object_info(r->objects, oid, NULL);
 	return kind == OBJ_TREE;
 }
 
 static int disambiguate_treeish_only(struct repository *r,
 				     const struct object_id *oid,
-				     void *cb_data_unused)
+				     void *cb_data UNUSED)
 {
 	struct object *obj;
 	int kind;
 
-	kind = oid_object_info(r, oid, NULL);
+	kind = odb_read_object_info(r->objects, oid, NULL);
 	if (kind == OBJ_TREE || kind == OBJ_COMMIT)
 		return 1;
 	if (kind != OBJ_TAG)
@@ -279,9 +193,9 @@ static int disambiguate_treeish_only(struct repository *r,
 
 static int disambiguate_blob_only(struct repository *r,
 				  const struct object_id *oid,
-				  void *cb_data_unused)
+				  void *cb_data UNUSED)
 {
-	int kind = oid_object_info(r, oid, NULL);
+	int kind = odb_read_object_info(r->objects, oid, NULL);
 	return kind == OBJ_BLOB;
 }
 
@@ -315,40 +229,57 @@ int set_disambiguate_hint_config(const char *var, const char *value)
 	return error("unknown hint type for '%s': %s", var, value);
 }
 
+static int parse_oid_prefix(const char *name, int len,
+			    const struct git_hash_algo *algo,
+			    char *hex_out,
+			    struct object_id *oid_out)
+{
+	for (int i = 0; i < len; i++) {
+		unsigned char c = name[i];
+		unsigned char val;
+		if (c >= '0' && c <= '9') {
+			val = c - '0';
+		} else if (c >= 'a' && c <= 'f') {
+			val = c - 'a' + 10;
+		} else if (c >= 'A' && c <='F') {
+			val = c - 'A' + 10;
+			c -= 'A' - 'a';
+		} else {
+			return -1;
+		}
+
+		if (hex_out)
+			hex_out[i] = c;
+		if (oid_out) {
+			if (!(i & 1))
+				val <<= 4;
+			oid_out->hash[i >> 1] |= val;
+		}
+	}
+
+	if (hex_out)
+		hex_out[len] = '\0';
+	if (oid_out)
+		oid_out->algo = algo ? hash_algo_by_ptr(algo) : GIT_HASH_UNKNOWN;
+
+	return 0;
+}
+
 static int init_object_disambiguation(struct repository *r,
 				      const char *name, int len,
+				      const struct git_hash_algo *algo,
 				      struct disambiguate_state *ds)
 {
-	int i;
-
-	if (len < MINIMUM_ABBREV || len > the_hash_algo->hexsz)
+	if (len < MINIMUM_ABBREV || len > GIT_MAX_HEXSZ)
 		return -1;
 
 	memset(ds, 0, sizeof(*ds));
 
-	for (i = 0; i < len ;i++) {
-		unsigned char c = name[i];
-		unsigned char val;
-		if (c >= '0' && c <= '9')
-			val = c - '0';
-		else if (c >= 'a' && c <= 'f')
-			val = c - 'a' + 10;
-		else if (c >= 'A' && c <='F') {
-			val = c - 'A' + 10;
-			c -= 'A' - 'a';
-		}
-		else
-			return -1;
-		ds->hex_pfx[i] = c;
-		if (!(i & 1))
-			val <<= 4;
-		ds->bin_pfx.hash[i >> 1] |= val;
-	}
+	if (parse_oid_prefix(name, len, algo, ds->hex_pfx, &ds->bin_pfx) < 0)
+		return -1;
 
 	ds->len = len;
-	ds->hex_pfx[len] = '\0';
 	ds->repo = r;
-	prepare_alt_odb(r);
 	return 0;
 }
 
@@ -371,7 +302,7 @@ static int show_ambiguous_object(const struct object_id *oid, void *data)
 		return 0;
 
 	hash = repo_find_unique_abbrev(ds->repo, oid, DEFAULT_ABBREV);
-	type = oid_object_info(ds->repo, oid, NULL);
+	type = odb_read_object_info(ds->repo->objects, oid, NULL);
 
 	if (type < 0) {
 		/*
@@ -394,8 +325,10 @@ static int show_ambiguous_object(const struct object_id *oid, void *data)
 		if (commit) {
 			struct pretty_print_context pp = {0};
 			pp.date_mode.type = DATE_SHORT;
-			format_commit_message(commit, "%ad", &date, &pp);
-			format_commit_message(commit, "%s", &msg, &pp);
+			repo_format_commit_message(the_repository, commit,
+						   "%ad", &date, &pp);
+			repo_format_commit_message(the_repository, commit,
+						   "%s", &msg, &pp);
 		}
 
 		/*
@@ -412,7 +345,7 @@ static int show_ambiguous_object(const struct object_id *oid, void *data)
 	} else if (type == OBJ_TAG) {
 		struct tag *tag = lookup_tag(ds->repo, oid);
 
-		if (!parse_tag(tag) && tag->tag) {
+		if (!parse_tag(ds->repo, tag) && tag->tag) {
 			/*
 			 * TRANSLATORS: This is a line of ambiguous
 			 * tag object output. E.g.:
@@ -473,18 +406,19 @@ static int collect_ambiguous(const struct object_id *oid, void *data)
 	return 0;
 }
 
-static int repo_collect_ambiguous(struct repository *r,
-				  const struct object_id *oid,
+static int repo_collect_ambiguous(const struct object_id *oid,
+				  struct object_info *oi UNUSED,
 				  void *data)
 {
 	return collect_ambiguous(oid, data);
 }
 
-static int sort_ambiguous(const void *a, const void *b, void *ctx)
+static int sort_ambiguous(const void *va, const void *vb, void *ctx)
 {
 	struct repository *sort_ambiguous_repo = ctx;
-	int a_type = oid_object_info(sort_ambiguous_repo, a, NULL);
-	int b_type = oid_object_info(sort_ambiguous_repo, b, NULL);
+	const struct object_id *a = va, *b = vb;
+	int a_type = odb_read_object_info(sort_ambiguous_repo->objects, a, NULL);
+	int b_type = odb_read_object_info(sort_ambiguous_repo->objects, b, NULL);
 	int a_type_sort;
 	int b_type_sort;
 
@@ -492,8 +426,12 @@ static int sort_ambiguous(const void *a, const void *b, void *ctx)
 	 * Sorts by hash within the same object type, just as
 	 * oid_array_for_each_unique() would do.
 	 */
-	if (a_type == b_type)
-		return oidcmp(a, b);
+	if (a_type == b_type) {
+		if (a->algo == b->algo)
+			return oidcmp(a, b);
+		else
+			return a->algo > b->algo ? 1 : -1;
+	}
 
 	/*
 	 * Between object types show tags, then commits, and finally
@@ -519,11 +457,16 @@ static enum get_oid_result get_short_oid(struct repository *r,
 					 struct object_id *oid,
 					 unsigned flags)
 {
+	struct odb_for_each_object_options opts = { 0 };
 	int status;
 	struct disambiguate_state ds;
 	int quietly = !!(flags & GET_OID_QUIETLY);
+	const struct git_hash_algo *algo = r->hash_algo;
 
-	if (init_object_disambiguation(r, name, len, &ds) < 0)
+	if (flags & GET_OID_HASH_ANY)
+		algo = NULL;
+
+	if (init_object_disambiguation(r, name, len, algo, &ds) < 0)
 		return -1;
 
 	if (HAS_MULTI_BITS(flags & GET_OID_DISAMBIGUATORS))
@@ -542,8 +485,11 @@ static enum get_oid_result get_short_oid(struct repository *r,
 	else
 		ds.fn = default_disambiguate_hint;
 
-	find_short_object_filename(&ds);
-	find_short_packed_object(&ds);
+	opts.prefix = &ds.bin_pfx;
+	opts.prefix_hex_len = ds.len;
+
+	odb_for_each_object_ext(r->objects, NULL, update_disambiguate_state,
+				&ds, &opts);
 	status = finish_object_disambiguation(&ds, oid);
 
 	/*
@@ -552,9 +498,9 @@ static enum get_oid_result get_short_oid(struct repository *r,
 	 * or migrated from loose to packed.
 	 */
 	if (status == MISSING_OBJECT) {
-		reprepare_packed_git(r);
-		find_short_object_filename(&ds);
-		find_short_packed_object(&ds);
+		odb_reprepare(r->objects);
+		odb_for_each_object_ext(r->objects, NULL, update_disambiguate_state,
+					&ds, &opts);
 		status = finish_object_disambiguation(&ds, oid);
 	}
 
@@ -577,7 +523,7 @@ static enum get_oid_result get_short_oid(struct repository *r,
 		if (!ds.ambiguous)
 			ds.fn = NULL;
 
-		repo_for_each_abbrev(r, ds.hex_pfx, collect_ambiguous, &collect);
+		repo_for_each_abbrev(r, ds.hex_pfx, algo, collect_ambiguous, &collect);
 		sort_ambiguous_oid_array(r, &collect);
 
 		if (oid_array_for_each(&collect, show_ambiguous_object, &out))
@@ -599,219 +545,57 @@ static enum get_oid_result get_short_oid(struct repository *r,
 }
 
 int repo_for_each_abbrev(struct repository *r, const char *prefix,
+			 const struct git_hash_algo *algo,
 			 each_abbrev_fn fn, void *cb_data)
 {
+	struct object_id prefix_oid = { 0 };
+	struct odb_for_each_object_options opts = {
+		.prefix = &prefix_oid,
+		.prefix_hex_len = strlen(prefix),
+	};
 	struct oid_array collect = OID_ARRAY_INIT;
-	struct disambiguate_state ds;
 	int ret;
 
-	if (init_object_disambiguation(r, prefix, strlen(prefix), &ds) < 0)
+	if (parse_oid_prefix(prefix, opts.prefix_hex_len, algo, NULL, &prefix_oid) < 0)
 		return -1;
 
-	ds.always_call_fn = 1;
-	ds.fn = repo_collect_ambiguous;
-	ds.cb_data = &collect;
-	find_short_object_filename(&ds);
-	find_short_packed_object(&ds);
+	if (odb_for_each_object_ext(r->objects, NULL, repo_collect_ambiguous, &collect, &opts) < 0)
+		return -1;
 
 	ret = oid_array_for_each_unique(&collect, fn, cb_data);
 	oid_array_clear(&collect);
 	return ret;
 }
 
-/*
- * Return the slot of the most-significant bit set in "val". There are various
- * ways to do this quickly with fls() or __builtin_clzl(), but speed is
- * probably not a big deal here.
- */
-static unsigned msb(unsigned long val)
+void strbuf_repo_add_unique_abbrev(struct strbuf *sb, struct repository *repo,
+				   const struct object_id *oid, int abbrev_len)
 {
-	unsigned r = 0;
-	while (val >>= 1)
-		r++;
-	return r;
+	int r;
+	strbuf_grow(sb, GIT_MAX_HEXSZ + 1);
+	r = repo_find_unique_abbrev_r(repo, sb->buf + sb->len, oid, abbrev_len);
+	strbuf_setlen(sb, sb->len + r);
 }
 
-struct min_abbrev_data {
-	unsigned int init_len;
-	unsigned int cur_len;
-	char *hex;
-	struct repository *repo;
-	const struct object_id *oid;
-};
-
-static inline char get_hex_char_from_oid(const struct object_id *oid,
-					 unsigned int pos)
+void strbuf_add_unique_abbrev(struct strbuf *sb, const struct object_id *oid,
+			      int abbrev_len)
 {
-	static const char hex[] = "0123456789abcdef";
-
-	if ((pos & 1) == 0)
-		return hex[oid->hash[pos >> 1] >> 4];
-	else
-		return hex[oid->hash[pos >> 1] & 0xf];
-}
-
-static int extend_abbrev_len(const struct object_id *oid, void *cb_data)
-{
-	struct min_abbrev_data *mad = cb_data;
-
-	unsigned int i = mad->init_len;
-	while (mad->hex[i] && mad->hex[i] == get_hex_char_from_oid(oid, i))
-		i++;
-
-	if (i < GIT_MAX_RAWSZ && i >= mad->cur_len)
-		mad->cur_len = i + 1;
-
-	return 0;
-}
-
-static int repo_extend_abbrev_len(struct repository *r,
-				  const struct object_id *oid,
-				  void *cb_data)
-{
-	return extend_abbrev_len(oid, cb_data);
-}
-
-static void find_abbrev_len_for_midx(struct multi_pack_index *m,
-				     struct min_abbrev_data *mad)
-{
-	int match = 0;
-	uint32_t num, first = 0;
-	struct object_id oid;
-	const struct object_id *mad_oid;
-
-	if (!m->num_objects)
-		return;
-
-	num = m->num_objects;
-	mad_oid = mad->oid;
-	match = bsearch_midx(mad_oid, m, &first);
-
-	/*
-	 * first is now the position in the packfile where we would insert
-	 * mad->hash if it does not exist (or the position of mad->hash if
-	 * it does exist). Hence, we consider a maximum of two objects
-	 * nearby for the abbreviation length.
-	 */
-	mad->init_len = 0;
-	if (!match) {
-		if (nth_midxed_object_oid(&oid, m, first))
-			extend_abbrev_len(&oid, mad);
-	} else if (first < num - 1) {
-		if (nth_midxed_object_oid(&oid, m, first + 1))
-			extend_abbrev_len(&oid, mad);
-	}
-	if (first > 0) {
-		if (nth_midxed_object_oid(&oid, m, first - 1))
-			extend_abbrev_len(&oid, mad);
-	}
-	mad->init_len = mad->cur_len;
-}
-
-static void find_abbrev_len_for_pack(struct packed_git *p,
-				     struct min_abbrev_data *mad)
-{
-	int match = 0;
-	uint32_t num, first = 0;
-	struct object_id oid;
-	const struct object_id *mad_oid;
-
-	if (p->multi_pack_index)
-		return;
-
-	if (open_pack_index(p) || !p->num_objects)
-		return;
-
-	num = p->num_objects;
-	mad_oid = mad->oid;
-	match = bsearch_pack(mad_oid, p, &first);
-
-	/*
-	 * first is now the position in the packfile where we would insert
-	 * mad->hash if it does not exist (or the position of mad->hash if
-	 * it does exist). Hence, we consider a maximum of two objects
-	 * nearby for the abbreviation length.
-	 */
-	mad->init_len = 0;
-	if (!match) {
-		if (!nth_packed_object_id(&oid, p, first))
-			extend_abbrev_len(&oid, mad);
-	} else if (first < num - 1) {
-		if (!nth_packed_object_id(&oid, p, first + 1))
-			extend_abbrev_len(&oid, mad);
-	}
-	if (first > 0) {
-		if (!nth_packed_object_id(&oid, p, first - 1))
-			extend_abbrev_len(&oid, mad);
-	}
-	mad->init_len = mad->cur_len;
-}
-
-static void find_abbrev_len_packed(struct min_abbrev_data *mad)
-{
-	struct multi_pack_index *m;
-	struct packed_git *p;
-
-	for (m = get_multi_pack_index(mad->repo); m; m = m->next)
-		find_abbrev_len_for_midx(m, mad);
-	for (p = get_packed_git(mad->repo); p; p = p->next)
-		find_abbrev_len_for_pack(p, mad);
+	strbuf_repo_add_unique_abbrev(sb, the_repository, oid, abbrev_len);
 }
 
 int repo_find_unique_abbrev_r(struct repository *r, char *hex,
-			      const struct object_id *oid, int len)
+			      const struct object_id *oid, int min_len)
 {
-	struct disambiguate_state ds;
-	struct min_abbrev_data mad;
-	struct object_id oid_ret;
-	const unsigned hexsz = r->hash_algo->hexsz;
+	const struct git_hash_algo *algo =
+		oid->algo ? &hash_algos[oid->algo] : r->hash_algo;
+	unsigned len;
 
-	if (len < 0) {
-		unsigned long count = repo_approximate_object_count(r);
-		/*
-		 * Add one because the MSB only tells us the highest bit set,
-		 * not including the value of all the _other_ bits (so "15"
-		 * is only one off of 2^4, but the MSB is the 3rd bit.
-		 */
-		len = msb(count) + 1;
-		/*
-		 * We now know we have on the order of 2^len objects, which
-		 * expects a collision at 2^(len/2). But we also care about hex
-		 * chars, not bits, and there are 4 bits per hex. So all
-		 * together we need to divide by 2 and round up.
-		 */
-		len = DIV_ROUND_UP(len, 2);
-		/*
-		 * For very small repos, we stick with our regular fallback.
-		 */
-		if (len < FALLBACK_DEFAULT_ABBREV)
-			len = FALLBACK_DEFAULT_ABBREV;
-	}
+	if (odb_find_abbrev_len(r->objects, oid, min_len, &len) < 0)
+		len = algo->hexsz;
 
 	oid_to_hex_r(hex, oid);
-	if (len == hexsz || !len)
-		return hexsz;
+	hex[len] = 0;
 
-	mad.repo = r;
-	mad.init_len = len;
-	mad.cur_len = len;
-	mad.hex = hex;
-	mad.oid = oid;
-
-	find_abbrev_len_packed(&mad);
-
-	if (init_object_disambiguation(r, hex, mad.cur_len, &ds) < 0)
-		return -1;
-
-	ds.fn = repo_extend_abbrev_len;
-	ds.always_call_fn = 1;
-	ds.cb_data = (void *)&mad;
-
-	find_short_object_filename(&ds);
-	(void)finish_object_disambiguation(&ds, &oid_ret);
-
-	hex[mad.cur_len] = 0;
-	return mad.cur_len;
+	return len;
 }
 
 const char *repo_find_unique_abbrev(struct repository *r,
@@ -873,7 +657,7 @@ static inline int upstream_mark(const char *string, int len)
 
 static inline int push_mark(const char *string, int len)
 {
-	const char *suffix[] = { "@{push}" };
+	const char *suffix[] = { "@{push}", "@{p}" };
 	return at_mark(string, len, suffix, ARRAY_SIZE(suffix));
 }
 
@@ -893,14 +677,18 @@ static int get_oid_basic(struct repository *r, const char *str, int len,
 	"\n"
 	"where \"$br\" is somehow empty and a 40-hex ref is created. Please\n"
 	"examine these refs and maybe delete them. Turn this message off by\n"
-	"running \"git config advice.objectNameWarning false\"");
+	"running \"git config set advice.objectNameWarning false\"");
 	struct object_id tmp_oid;
 	char *real_ref = NULL;
 	int refs_found = 0;
 	int at, reflog_len, nth_prior = 0;
+	int fatal = !(flags & GET_OID_QUIETLY);
+	struct repo_config_values *cfg = repo_config_values(the_repository);
 
 	if (len == r->hash_algo->hexsz && !get_oid_hex(str, oid)) {
-		if (warn_ambiguous_refs && warn_on_object_refname_ambiguity) {
+		if (!(flags & GET_OID_SKIP_AMBIGUITY_CHECK) &&
+		    repo_settings_get_warn_ambiguous_refs(r) &&
+		    cfg->warn_on_object_refname_ambiguity) {
 			refs_found = repo_dwim_ref(r, str, len, &tmp_oid, &real_ref, 0);
 			if (refs_found > 0) {
 				warning(warn_msg, len, str);
@@ -952,16 +740,16 @@ static int get_oid_basic(struct repository *r, const char *str, int len,
 
 	if (!len && reflog_len)
 		/* allow "@{...}" to mean the current branch reflog */
-		refs_found = repo_dwim_ref(r, "HEAD", 4, oid, &real_ref, 0);
+		refs_found = repo_dwim_ref(r, "HEAD", 4, oid, &real_ref, !fatal);
 	else if (reflog_len)
 		refs_found = repo_dwim_log(r, str, len, oid, &real_ref);
 	else
-		refs_found = repo_dwim_ref(r, str, len, oid, &real_ref, 0);
+		refs_found = repo_dwim_ref(r, str, len, oid, &real_ref, !fatal);
 
 	if (!refs_found)
 		return -1;
 
-	if (warn_ambiguous_refs && !(flags & GET_OID_QUIETLY) &&
+	if (repo_settings_get_warn_ambiguous_refs(r) && !(flags & GET_OID_QUIETLY) &&
 	    (refs_found > 1 ||
 	     !get_short_oid(r, str, len, &tmp_oid, GET_OID_QUIETLY)))
 		warning(warn_msg, len, str);
@@ -1009,12 +797,25 @@ static int get_oid_basic(struct repository *r, const char *str, int len,
 						len, str,
 						show_date(co_time, co_tz, DATE_MODE(RFC2822)));
 				}
-			} else {
+			} else if (nth == co_cnt && !is_null_oid(oid)) {
+				/*
+				 * We were asked for the Nth reflog (counting
+				 * from 0), but there were only N entries.
+				 * read_ref_at() will have returned "1" to tell
+				 * us it did not find an entry, but it did
+				 * still fill in the oid with the "old" value,
+				 * which we can use.
+				 */
+			} else if (!(flags & GET_OID_GENTLY)) {
 				if (flags & GET_OID_QUIETLY) {
 					exit(128);
 				}
 				die(_("log for '%.*s' only has %d entries"),
 				    len, str, co_cnt);
+			}
+			if (flags & GET_OID_GENTLY) {
+				free(real_ref);
+				return -1;
 			}
 		}
 	}
@@ -1036,7 +837,7 @@ static enum get_oid_result get_parent(struct repository *r,
 	if (ret)
 		return ret;
 	commit = lookup_commit_reference(r, &oid);
-	if (parse_commit(commit))
+	if (repo_parse_commit(r, commit))
 		return MISSING_OBJECT;
 	if (!idx) {
 		oidcpy(result, &commit->object.oid);
@@ -1070,7 +871,7 @@ static enum get_oid_result get_nth_ancestor(struct repository *r,
 		return MISSING_OBJECT;
 
 	while (generation--) {
-		if (parse_commit(commit) || !commit->parents)
+		if (repo_parse_commit(r, commit) || !commit->parents)
 			return MISSING_OBJECT;
 		commit = commit->parents->item;
 	}
@@ -1194,10 +995,64 @@ static int peel_onion(struct repository *r, const char *name, int len,
 		prefix = xstrndup(sp + 1, name + len - 1 - (sp + 1));
 		commit_list_insert((struct commit *)o, &list);
 		ret = get_oid_oneline(r, prefix, oid, list);
+
+		commit_list_free(list);
 		free(prefix);
 		return ret;
 	}
 	return 0;
+}
+
+/*
+ * Documentation/revisions.adoc says:
+ *    '<describeOutput>', e.g. 'v1.7.4.2-679-g3bee7fb'::
+ *      Output from `git describe`; i.e. a closest tag, optionally
+ *      followed by a dash and a number of commits, followed by a dash, a
+ *      'g', and an abbreviated object name.
+ *
+ * which means that the stuff before '-g${HASH}' needs to be a valid
+ * refname, a dash, and a non-negative integer.  This function verifies
+ * that.
+ *
+ * In particular, we do not want to treat
+ *   branchname:path/to/file/named/i-gaffed
+ * as a request for commit affed.
+ *
+ * More generally, we should probably not treat
+ *   'refs/heads/./../.../ ~^:/?*[////\\\&}/busted.lock-g050e0ef6ead'
+ * as a request for object 050e0ef6ead either.
+ *
+ * We are called with name[len] == '-' and name[len+1] == 'g', i.e.
+ * we are verifying ${REFNAME}-{INTEGER} part of the name.
+ */
+static int ref_and_count_parts_valid(const char *name, int len)
+{
+	struct strbuf sb;
+	const char *cp;
+	int flags = REFNAME_ALLOW_ONELEVEL;
+	int ret = 1;
+
+	/* Ensure we have at least one digit */
+	if (!isxdigit(name[len-1]))
+		return 0;
+
+	/* Skip over digits backwards until we get to the dash */
+	for (cp = name + len - 2; name < cp; cp--) {
+		if (*cp == '-')
+			break;
+		if (!isxdigit(*cp))
+			return 0;
+	}
+	/* Ensure we found the leading dash */
+	if (*cp != '-')
+		return 0;
+
+	len = cp - name;
+	strbuf_init(&sb, len);
+	strbuf_add(&sb, name, len);
+	ret = !check_refname_format(sb.buf, flags);
+	strbuf_release(&sb);
+	return ret;
 }
 
 static int get_describe_name(struct repository *r,
@@ -1213,7 +1068,8 @@ static int get_describe_name(struct repository *r,
 			/* We must be looking at g in "SOMETHING-g"
 			 * for it to be describe output.
 			 */
-			if (ch == 'g' && cp[-1] == '-') {
+			if (ch == 'g' && cp[-1] == '-' &&
+			    ref_and_count_parts_valid(name, cp - 1 - name)) {
 				cp++;
 				len -= cp - name;
 				return get_short_oid(r,
@@ -1305,17 +1161,16 @@ struct handle_one_ref_cb {
 	struct commit_list **list;
 };
 
-static int handle_one_ref(const char *path, const struct object_id *oid,
-			  int flag, void *cb_data)
+static int handle_one_ref(const struct reference *ref, void *cb_data)
 {
 	struct handle_one_ref_cb *cb = cb_data;
 	struct commit_list **list = cb->list;
-	struct object *object = parse_object(cb->repo, oid);
+	struct object *object = parse_object(cb->repo, ref->oid);
 	if (!object)
 		return 0;
 	if (object->type == OBJ_TAG) {
-		object = deref_tag(cb->repo, object, path,
-				   strlen(path));
+		object = deref_tag(cb->repo, object, ref->name,
+				   strlen(ref->name));
 		if (!object)
 			return 0;
 	}
@@ -1327,9 +1182,10 @@ static int handle_one_ref(const char *path, const struct object_id *oid,
 
 static int get_oid_oneline(struct repository *r,
 			   const char *prefix, struct object_id *oid,
-			   struct commit_list *list)
+			   const struct commit_list *list)
 {
-	struct commit_list *backup = NULL, *l;
+	struct prio_queue copy = { compare_commits_by_commit_date };
+	const struct commit_list *l;
 	int found = 0;
 	int negative = 0;
 	regex_t regex;
@@ -1350,20 +1206,20 @@ static int get_oid_oneline(struct repository *r,
 
 	for (l = list; l; l = l->next) {
 		l->item->object.flags |= ONELINE_SEEN;
-		commit_list_insert(l->item, &backup);
+		prio_queue_put(&copy, l->item);
 	}
-	while (list) {
+	while (prio_queue_size(&copy)) {
 		const char *p, *buf;
 		struct commit *commit;
 		int matches;
 
-		commit = pop_most_recent_commit(&list, ONELINE_SEEN);
+		commit = pop_most_recent_commit(&copy, ONELINE_SEEN);
 		if (!parse_object(r, &commit->object.oid))
 			continue;
-		buf = get_commit_buffer(commit, NULL);
+		buf = repo_get_commit_buffer(r, commit, NULL);
 		p = strstr(buf, "\n\n");
 		matches = negative ^ (p && !regexec(&regex, p + 2, 0, NULL, 0));
-		unuse_commit_buffer(commit, buf);
+		repo_unuse_commit_buffer(r, commit, buf);
 
 		if (matches) {
 			oidcpy(oid, &commit->object.oid);
@@ -1372,10 +1228,9 @@ static int get_oid_oneline(struct repository *r,
 		}
 	}
 	regfree(&regex);
-	free_commit_list(list);
-	for (l = backup; l; l = l->next)
+	for (l = list; l; l = l->next)
 		clear_commit_marks(l->item, ONELINE_SEEN);
-	free_commit_list(backup);
+	clear_prio_queue(&copy);
 	return found ? 0 : -1;
 }
 
@@ -1384,8 +1239,12 @@ struct grab_nth_branch_switch_cbdata {
 	struct strbuf *sb;
 };
 
-static int grab_nth_branch_switch(struct object_id *ooid, struct object_id *noid,
-				  const char *email, timestamp_t timestamp, int tz,
+static int grab_nth_branch_switch(const char *refname UNUSED,
+				  struct object_id *ooid UNUSED,
+				  struct object_id *noid UNUSED,
+				  const char *email UNUSED,
+				  timestamp_t timestamp UNUSED,
+				  int tz UNUSED,
 				  const char *message, void *cb_data)
 {
 	struct grab_nth_branch_switch_cbdata *cb = cb_data;
@@ -1450,7 +1309,7 @@ int repo_get_oid_mb(struct repository *r,
 		    struct object_id *oid)
 {
 	struct commit *one, *two;
-	struct commit_list *mbs;
+	struct commit_list *mbs = NULL;
 	struct object_id oid_tmp;
 	const char *dots;
 	int st;
@@ -1478,14 +1337,17 @@ int repo_get_oid_mb(struct repository *r,
 	two = lookup_commit_reference_gently(r, &oid_tmp, 0);
 	if (!two)
 		return -1;
-	mbs = repo_get_merge_bases(r, one, two);
+	if (repo_get_merge_bases(r, one, two, &mbs) < 0) {
+		commit_list_free(mbs);
+		return -1;
+	}
 	if (!mbs || mbs->next)
 		st = -1;
 	else {
 		st = 0;
 		oidcpy(oid, &mbs->item->object.oid);
 	}
-	free_commit_list(mbs);
+	commit_list_free(mbs);
 	return st;
 }
 
@@ -1513,7 +1375,8 @@ static int interpret_empty_at(const char *name, int namelen, int len, struct str
 
 static int reinterpret(struct repository *r,
 		       const char *name, int namelen, int len,
-		       struct strbuf *buf, unsigned allowed)
+		       struct strbuf *buf,
+		       enum interpret_branch_kind allowed)
 {
 	/* we have extra data, which might need further processing */
 	struct strbuf tmp = STRBUF_INIT;
@@ -1545,7 +1408,8 @@ static void set_shortened_ref(struct repository *r, struct strbuf *buf, const ch
 	free(s);
 }
 
-static int branch_interpret_allowed(const char *refname, unsigned allowed)
+static int branch_interpret_allowed(const char *refname,
+				    enum interpret_branch_kind allowed)
 {
 	if (!allowed)
 		return 1;
@@ -1609,7 +1473,7 @@ int repo_interpret_branch_name(struct repository *r,
 			       struct strbuf *buf,
 			       const struct interpret_branch_name_options *options)
 {
-	char *at;
+	const char *at;
 	const char *start;
 	int len;
 
@@ -1656,49 +1520,24 @@ int repo_interpret_branch_name(struct repository *r,
 	return -1;
 }
 
-void strbuf_branchname(struct strbuf *sb, const char *name, unsigned allowed)
+void object_context_release(struct object_context *ctx)
 {
-	int len = strlen(name);
-	struct interpret_branch_name_options options = {
-		.allowed = allowed
-	};
-	int used = interpret_branch_name(name, len, sb, &options);
-
-	if (used < 0)
-		used = 0;
-	strbuf_add(sb, name + used, len - used);
+	free(ctx->path);
+	strbuf_release(&ctx->symlink_path);
 }
 
-int strbuf_check_branch_ref(struct strbuf *sb, const char *name)
-{
-	if (startup_info->have_repository)
-		strbuf_branchname(sb, name, INTERPRET_BRANCH_LOCAL);
-	else
-		strbuf_addstr(sb, name);
-
-	/*
-	 * This splice must be done even if we end up rejecting the
-	 * name; builtin/branch.c::copy_or_rename_branch() still wants
-	 * to see what the name expanded to so that "branch -m" can be
-	 * used as a tool to correct earlier mistakes.
-	 */
-	strbuf_splice(sb, 0, 0, "refs/heads/", 11);
-
-	if (*name == '-' ||
-	    !strcmp(sb->buf, "refs/heads/HEAD"))
-		return -1;
-
-	return check_refname_format(sb->buf, 0);
-}
-
-/*
- * This is like "get_oid_basic()", except it allows "object ID expressions",
- * notably "xyz^" for "parent of xyz"
- */
-int repo_get_oid(struct repository *r, const char *name, struct object_id *oid)
+int repo_get_oid_with_flags(struct repository *r, const char *name,
+			    struct object_id *oid, unsigned flags)
 {
 	struct object_context unused;
-	return get_oid_with_context(r, name, 0, oid, &unused);
+	int ret = get_oid_with_context(r, name, flags, oid, &unused);
+	object_context_release(&unused);
+	return ret;
+}
+
+int repo_get_oid(struct repository *r, const char *name, struct object_id *oid)
+{
+	return repo_get_oid_with_flags(r, name, oid, 0);
 }
 
 /*
@@ -1715,7 +1554,7 @@ int get_oidf(struct object_id *oid, const char *fmt, ...)
 	strbuf_vaddf(&sb, fmt, ap);
 	va_end(ap);
 
-	ret = get_oid(sb.buf, oid);
+	ret = repo_get_oid(the_repository, sb.buf, oid);
 	strbuf_release(&sb);
 
 	return ret;
@@ -1735,45 +1574,35 @@ int repo_get_oid_committish(struct repository *r,
 			    const char *name,
 			    struct object_id *oid)
 {
-	struct object_context unused;
-	return get_oid_with_context(r, name, GET_OID_COMMITTISH,
-				    oid, &unused);
+	return repo_get_oid_with_flags(r, name, oid, GET_OID_COMMITTISH);
 }
 
 int repo_get_oid_treeish(struct repository *r,
 			 const char *name,
 			 struct object_id *oid)
 {
-	struct object_context unused;
-	return get_oid_with_context(r, name, GET_OID_TREEISH,
-				    oid, &unused);
+	return repo_get_oid_with_flags(r, name, oid, GET_OID_TREEISH);
 }
 
 int repo_get_oid_commit(struct repository *r,
 			const char *name,
 			struct object_id *oid)
 {
-	struct object_context unused;
-	return get_oid_with_context(r, name, GET_OID_COMMIT,
-				    oid, &unused);
+	return repo_get_oid_with_flags(r, name, oid, GET_OID_COMMIT);
 }
 
 int repo_get_oid_tree(struct repository *r,
 		      const char *name,
 		      struct object_id *oid)
 {
-	struct object_context unused;
-	return get_oid_with_context(r, name, GET_OID_TREE,
-				    oid, &unused);
+	return repo_get_oid_with_flags(r, name, oid, GET_OID_TREE);
 }
 
 int repo_get_oid_blob(struct repository *r,
 		      const char *name,
 		      struct object_id *oid)
 {
-	struct object_context unused;
-	return get_oid_with_context(r, name, GET_OID_BLOB,
-				    oid, &unused);
+	return repo_get_oid_with_flags(r, name, oid, GET_OID_BLOB);
 }
 
 /* Must be called only when object_name:filename doesn't exist. */
@@ -1874,12 +1703,12 @@ static char *resolve_relative_path(struct repository *r, const char *rel)
 	if (!starts_with(rel, "./") && !starts_with(rel, "../"))
 		return NULL;
 
-	if (r != the_repository || !is_inside_work_tree())
+	if (r != the_repository || !is_inside_work_tree(the_repository))
 		die(_("relative path syntax can't be used outside working tree"));
 
 	/* die() inside prefix_path() if resolved path is outside worktree */
-	return prefix_path(startup_info->prefix,
-			   startup_info->prefix ? strlen(startup_info->prefix) : 0,
+	return prefix_path(the_repository, the_repository->prefix,
+			   the_repository->prefix ? strlen(the_repository->prefix) : 0,
 			   rel);
 }
 
@@ -1938,8 +1767,10 @@ static enum get_oid_result get_oid_with_context_1(struct repository *repo,
 			cb.list = &list;
 			refs_for_each_ref(get_main_ref_store(repo), handle_one_ref, &cb);
 			refs_head_ref(get_main_ref_store(repo), handle_one_ref, &cb);
-			commit_list_sort_by_date(&list);
-			return get_oid_oneline(repo, name + 2, oid, list);
+			ret = get_oid_oneline(repo, name + 2, oid, list);
+
+			commit_list_free(list);
+			return ret;
 		}
 		if (namelen < 3 ||
 		    name[2] != ':' ||
@@ -1971,13 +1802,15 @@ static enum get_oid_result get_oid_with_context_1(struct repository *repo,
 			    memcmp(ce->name, cp, namelen))
 				break;
 			if (ce_stage(ce) == stage) {
+				int ret = reject_tree_in_index(repo, only_to_die, ce,
+							       stage, prefix, cp);
+
+				if (!ret) {
+					oidcpy(oid, &ce->oid);
+					oc->mode = ce->ce_mode;
+				}
 				free(new_path);
-				if (reject_tree_in_index(repo, only_to_die, ce,
-							 stage, prefix, cp))
-					return -1;
-				oidcpy(oid, &ce->oid);
-				oc->mode = ce->ce_mode;
-				return 0;
+				return ret;
 			}
 			pos++;
 		}
@@ -1987,12 +1820,14 @@ static enum get_oid_result get_oid_with_context_1(struct repository *repo,
 		return -1;
 	}
 	for (cp = name, bracket_depth = 0; *cp; cp++) {
-		if (*cp == '{')
+		if (strchr("@^", *cp) && cp[1] == '{') {
+			cp++;
 			bracket_depth++;
-		else if (bracket_depth && *cp == '}')
+		} else if (bracket_depth && *cp == '}') {
 			bracket_depth--;
-		else if (!bracket_depth && *cp == ':')
+		} else if (!bracket_depth && *cp == ':') {
 			break;
+		}
 	}
 	if (*cp == ':') {
 		struct object_id tree_oid;
@@ -2051,6 +1886,7 @@ void maybe_die_on_misspelt_object_name(struct repository *r,
 	struct object_id oid;
 	get_oid_with_context_1(r, name, GET_OID_ONLY_TO_DIE | GET_OID_QUIETLY,
 			       prefix, &oid, &oc);
+	object_context_release(&oc);
 }
 
 enum get_oid_result get_oid_with_context(struct repository *repo,

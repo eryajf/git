@@ -5,6 +5,8 @@
 
 #include "strvec.h"
 
+struct repository;
+
 /**
  * The run-command API offers a versatile tool to run sub-processes with
  * redirected input and output as well as with a modified environment
@@ -136,11 +138,20 @@ struct child_process {
 	 * want to repack because that would delete `.pack` files (and on
 	 * Windows, you cannot delete files that are still in use).
 	 */
-	unsigned close_object_store:1;
+	struct object_database *odb_to_close;
 
 	unsigned stdout_to_stderr:1;
 	unsigned clean_on_exit:1;
 	unsigned wait_after_clean:1;
+
+	/**
+	 * Close file descriptors 3 and above in the child after forking
+	 * but before exec.  This prevents the child from inheriting
+	 * pipe endpoints or other descriptors from the parent
+	 * environment (e.g., the test harness).
+	 */
+	unsigned close_fd_above_stderr:1;
+
 	void (*clean_on_exit_handler)(struct child_process *process);
 };
 
@@ -150,9 +161,7 @@ struct child_process {
 }
 
 /**
- * The functions: child_process_init, start_command, finish_command,
- * run_command, run_command_v_opt, run_command_v_opt_cd_env, child_process_clear
- * do the following:
+ * The functions: start_command, finish_command, run_command do the following:
  *
  * - If a system call failed, errno is set and -1 is returned. A diagnostic
  *   is printed.
@@ -198,6 +207,11 @@ int is_executable(const char *name);
 int exists_in_PATH(const char *command);
 
 /**
+ * Return the path that is used to execute Unix shell command-lines.
+ */
+char *git_shell_path(void);
+
+/**
  * Start a sub-process. Takes a pointer to a `struct child_process`
  * that specifies the details and returns pipe FDs (if requested).
  * See below for details.
@@ -220,39 +234,17 @@ int finish_command_in_signal(struct child_process *);
 int run_command(struct child_process *);
 
 /*
+ * Prepare a `struct child_process` to run auto-maintenance. Returns 1 if the
+ * process has been prepared and is ready to run, or 0 in case auto-maintenance
+ * should be skipped.
+ */
+int prepare_auto_maintenance(struct repository *r, int quiet,
+			     struct child_process *maint);
+
+/*
  * Trigger an auto-gc
  */
-int run_auto_maintenance(int quiet);
-
-#define RUN_COMMAND_NO_STDIN		(1<<0)
-#define RUN_GIT_CMD			(1<<1)
-#define RUN_COMMAND_STDOUT_TO_STDERR	(1<<2)
-#define RUN_SILENT_EXEC_FAILURE		(1<<3)
-#define RUN_USING_SHELL			(1<<4)
-#define RUN_CLEAN_ON_EXIT		(1<<5)
-#define RUN_WAIT_AFTER_CLEAN		(1<<6)
-#define RUN_CLOSE_OBJECT_STORE		(1<<7)
-
-/**
- * Convenience functions that encapsulate a sequence of
- * start_command() followed by finish_command(). The argument argv
- * specifies the program and its arguments. The argument opt is zero
- * or more of the flags `RUN_COMMAND_NO_STDIN`, `RUN_GIT_CMD`,
- * `RUN_COMMAND_STDOUT_TO_STDERR`, or `RUN_SILENT_EXEC_FAILURE`
- * that correspond to the members .no_stdin, .git_cmd,
- * .stdout_to_stderr, .silent_exec_failure of `struct child_process`.
- * The argument dir corresponds the member .dir. The argument env
- * corresponds to the member .env.
- */
-int run_command_v_opt(const char **argv, int opt);
-int run_command_v_opt_tr2(const char **argv, int opt, const char *tr2_class);
-/*
- * env (the environment) is to be formatted like environ: "VAR=VALUE".
- * To unset an environment variable use just "VAR".
- */
-int run_command_v_opt_cd_env(const char **argv, int opt, const char *dir, const char *const *env);
-int run_command_v_opt_cd_env_tr2(const char **argv, int opt, const char *dir,
-				 const char *const *env, const char *tr2_class);
+int run_auto_maintenance(struct repository *r, int quiet);
 
 /**
  * Execute the given command, sending "in" to its stdin, and capturing its
@@ -441,6 +433,21 @@ typedef int (*start_failure_fn)(struct strbuf *out,
 				void *pp_task_cb);
 
 /**
+ * This callback is repeatedly called on every child process who requests
+ * start_command() to create a pipe by setting child_process.in < 0.
+ *
+ * pp_cb is the callback cookie as passed into run_processes_parallel, and
+ * pp_task_cb is the callback cookie as passed into get_next_task_fn.
+ *
+ * Returns < 0 for error
+ * Returns == 0 when there is more data to be fed (will be called again)
+ * Returns > 0 when finished (child closed fd or no more data to be fed)
+ */
+typedef int (*feed_pipe_fn)(int child_in,
+				void *pp_cb,
+				void *pp_task_cb);
+
+/**
  * This callback is called on every child process that finished processing.
  *
  * See run_processes_parallel() below for a discussion of the "struct
@@ -459,16 +466,69 @@ typedef int (*task_finished_fn)(int result,
 				void *pp_task_cb);
 
 /**
- * Runs up to n processes at the same time. Whenever a process can be
- * started, the callback get_next_task_fn is called to obtain the data
+ * Option used by run_processes_parallel(), { 0 }-initialized means no
+ * options.
+ */
+struct run_process_parallel_opts
+{
+	/**
+	 * tr2_category & tr2_label: sets the trace2 category and label for
+	 * logging. These must either be unset, or both of them must be set.
+	 */
+	const char *tr2_category;
+	const char *tr2_label;
+
+	/**
+	 * processes: see 'processes' in run_processes_parallel() below.
+	 */
+	size_t processes;
+
+	/**
+	 * ungroup: see 'ungroup' in run_processes_parallel() below.
+	 */
+	unsigned int ungroup:1;
+
+	/**
+	 * get_next_task: See get_next_task_fn() above. This must be
+	 * specified.
+	 */
+	get_next_task_fn get_next_task;
+
+	/**
+	 * start_failure: See start_failure_fn() above. This can be
+	 * NULL to omit any special handling.
+	 */
+	start_failure_fn start_failure;
+
+	/*
+	 * feed_pipe: see feed_pipe_fn() above. This can be NULL to omit any
+	 * special handling.
+	 */
+	feed_pipe_fn feed_pipe;
+
+	/**
+	 * task_finished: See task_finished_fn() above. This can be
+	 * NULL to omit any special handling.
+	 */
+	task_finished_fn task_finished;
+
+	/**
+	 * data: user data, will be passed as "pp_cb" to the callback
+	 * parameters.
+	 */
+	void *data;
+};
+
+/**
+ * Options are passed via the "struct run_process_parallel_opts" above.
+ *
+ * Runs N 'processes' at the same time. Whenever a process can be
+ * started, the callback opts.get_next_task is called to obtain the data
  * required to start another child process.
  *
  * The children started via this function run in parallel. Their output
  * (both stdout and stderr) is routed to stderr in a manner that output
  * from different tasks does not interleave (but see "ungroup" below).
- *
- * start_failure_fn and task_finished_fn can be NULL to omit any
- * special handling.
  *
  * If the "ungroup" option isn't specified, the API will set the
  * "stdout_to_stderr" parameter in "struct child_process" and provide
@@ -479,28 +539,21 @@ typedef int (*task_finished_fn)(int result,
  * NULL "struct strbuf *out" parameter, and are responsible for
  * emitting their own output, including dealing with any race
  * conditions due to writing in parallel to stdout and stderr.
- * The "ungroup" option can be enabled by setting the global
- * "run_processes_parallel_ungroup" to "1" before invoking
- * run_processes_parallel(), it will be set back to "0" as soon as the
- * API reads that setting.
  */
-extern int run_processes_parallel_ungroup;
-int run_processes_parallel(int n,
-			   get_next_task_fn,
-			   start_failure_fn,
-			   task_finished_fn,
-			   void *pp_cb);
-int run_processes_parallel_tr2(int n, get_next_task_fn, start_failure_fn,
-			       task_finished_fn, void *pp_cb,
-			       const char *tr2_category, const char *tr2_label);
+void run_processes_parallel(const struct run_process_parallel_opts *opts);
+
+/**
+ * Unset all local-repo GIT_* variables in env; see local_repo_env in
+ * environment.h. GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are preserved
+ * to pass -c and --config-env options from the parent process.
+ */
+void sanitize_repo_env(struct strvec *env);
 
 /**
  * Convenience function which prepares env for a command to be run in a
- * new repo. This adds all GIT_* environment variables to env with the
- * exception of GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT (which cause the
- * corresponding environment variables to be unset in the subprocess) and adds
- * an environment variable pointing to new_git_dir. See local_repo_env in
- * cache.h for more information.
+ * new repo. This removes variables pointing to the local repository (using
+ * sanitize_repo_env() above), and adds an environment variable pointing to
+ * new_git_dir.
  */
 void prepare_other_repo_env(struct strvec *env, const char *new_git_dir);
 
@@ -520,7 +573,7 @@ enum start_bg_result {
 	/* timeout expired waiting for child to become "ready" */
 	SBGR_TIMEOUT,
 
-	/* child process exited or was signalled before becomming "ready" */
+	/* child process exited or was signalled before becoming "ready" */
 	SBGR_DIED,
 };
 
@@ -560,5 +613,7 @@ enum start_bg_result start_bg_command(struct child_process *cmd,
 				      start_bg_wait_cb *wait_cb,
 				      void *cb_data,
 				      unsigned int timeout_sec);
+
+int sane_execvp(const char *file, char *const argv[]);
 
 #endif

@@ -1,15 +1,22 @@
-#include "cache.h"
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
 #include "run-command.h"
+#include "environment.h"
 #include "exec-cmd.h"
+#include "gettext.h"
 #include "sigchain.h"
 #include "strvec.h"
+#include "symlinks.h"
 #include "thread-utils.h"
 #include "strbuf.h"
 #include "string-list.h"
+#include "trace.h"
+#include "trace2.h"
 #include "quote.h"
 #include "config.h"
 #include "packfile.h"
-#include "hook.h"
+#include "compat/nonblock.h"
 
 void child_process_init(struct child_process *child)
 {
@@ -163,6 +170,7 @@ int is_executable(const char *name)
 	return st.st_mode & S_IXUSR;
 }
 
+#ifndef locate_in_PATH
 /*
  * Search $PATH for a command.  This emulates the path search that
  * execvp would perform, without actually executing the command so it
@@ -211,6 +219,7 @@ static char *locate_in_PATH(const char *file)
 	strbuf_release(&buf);
 	return NULL;
 }
+#endif
 
 int exists_in_PATH(const char *command)
 {
@@ -265,17 +274,24 @@ int sane_execvp(const char *file, char * const argv[])
 	return -1;
 }
 
+char *git_shell_path(void)
+{
+#ifndef GIT_WINDOWS_NATIVE
+	return xstrdup(SHELL_PATH);
+#else
+	char *p = locate_in_PATH("sh");
+	convert_slashes(p);
+	return p;
+#endif
+}
+
 static const char **prepare_shell_cmd(struct strvec *out, const char **argv)
 {
 	if (!argv[0])
 		BUG("shell command is empty");
 
 	if (strcspn(argv[0], "|&;<>()$`\\\"' \t\n*?[#~=%") != strlen(argv[0])) {
-#ifndef GIT_WINDOWS_NATIVE
-		strvec_push(out, SHELL_PATH);
-#else
-		strvec_push(out, "sh");
-#endif
+		strvec_push_nodup(out, git_shell_path());
 		strvec_push(out, "-c");
 
 		/*
@@ -300,7 +316,6 @@ enum child_errcode {
 	CHILD_ERR_DUP2,
 	CHILD_ERR_CLOSE,
 	CHILD_ERR_SIGPROCMASK,
-	CHILD_ERR_ENOENT,
 	CHILD_ERR_SILENT,
 	CHILD_ERR_ERRNO
 };
@@ -340,19 +355,19 @@ static void child_close_pair(int fd[2])
 	child_close(fd[1]);
 }
 
-static void child_error_fn(const char *err, va_list params)
+static void child_error_fn(const char *err UNUSED, va_list params UNUSED)
 {
 	const char msg[] = "error() should not be called in child\n";
 	xwrite(2, msg, sizeof(msg) - 1);
 }
 
-static void child_warn_fn(const char *err, va_list params)
+static void child_warn_fn(const char *err UNUSED, va_list params UNUSED)
 {
 	const char msg[] = "warn() should not be called in child\n";
 	xwrite(2, msg, sizeof(msg) - 1);
 }
 
-static void NORETURN child_die_fn(const char *err, va_list params)
+static void NORETURN child_die_fn(const char *err UNUSED, va_list params UNUSED)
 {
 	const char msg[] = "die() should not be called in child\n";
 	xwrite(2, msg, sizeof(msg) - 1);
@@ -382,9 +397,6 @@ static void child_err_spew(struct child_process *cmd, struct child_err *cerr)
 		break;
 	case CHILD_ERR_SIGPROCMASK:
 		error_errno("sigprocmask failed restoring signals");
-		break;
-	case CHILD_ERR_ENOENT:
-		error_errno("cannot run %s", cmd->args.v[0]);
 		break;
 	case CHILD_ERR_SILENT:
 		break;
@@ -502,7 +514,13 @@ static void atfork_prepare(struct atfork_state *as)
 {
 	sigset_t all;
 
-	if (sigfillset(&all))
+	/*
+	 * POSIX says sigfillset() can fail, but an overly clever
+	 * compiler can see through the header files and decide
+	 * it cannot fail on a particular platform it is compiling for,
+	 * triggering -Wunreachable-code false positive.
+	 */
+	if (NOT_CONSTANT(sigfillset(&all)))
 		die_errno("sigfillset");
 #ifdef NO_PTHREADS
 	if (sigprocmask(SIG_SETMASK, &all, &as->old))
@@ -527,6 +545,7 @@ static void atfork_parent(struct atfork_state *as)
 		"restoring signal mask");
 #endif
 }
+
 #endif /* GIT_WINDOWS_NATIVE */
 
 static inline void set_cloexec(int fd)
@@ -586,11 +605,11 @@ static void trace_add_env(struct strbuf *dst, const char *const *deltaenv)
 	/* Last one wins, see run-command.c:prep_childenv() for context */
 	for (e = deltaenv; e && *e; e++) {
 		struct strbuf key = STRBUF_INIT;
-		char *equals = strchr(*e, '=');
+		const char *equals = strchr(*e, '=');
 
 		if (equals) {
 			strbuf_add(&key, *e, equals - *e);
-			string_list_insert(&envs, key.buf)->util = equals + 1;
+			string_list_insert(&envs, key.buf)->util = (void *)(equals + 1);
 		} else {
 			string_list_insert(&envs, *e)->util = NULL;
 		}
@@ -660,7 +679,7 @@ int start_command(struct child_process *cmd)
 	int need_in, need_out, need_err;
 	int fdin[2], fdout[2], fderr[2];
 	int failed_errno;
-	char *str;
+	const char *str;
 
 	/*
 	 * In case of errors we must keep the promise to close FDs
@@ -687,7 +706,7 @@ int start_command(struct child_process *cmd)
 			failed_errno = errno;
 			if (need_in)
 				close_pair(fdin);
-			else if (cmd->in)
+			else if (cmd->in > 0)
 				close(cmd->in);
 			str = "standard output";
 			goto fail_pipe;
@@ -701,11 +720,11 @@ int start_command(struct child_process *cmd)
 			failed_errno = errno;
 			if (need_in)
 				close_pair(fdin);
-			else if (cmd->in)
+			else if (cmd->in > 0)
 				close(cmd->in);
 			if (need_out)
 				close_pair(fdout);
-			else if (cmd->out)
+			else if (cmd->out > 0)
 				close(cmd->out);
 			str = "standard error";
 fail_pipe:
@@ -723,8 +742,8 @@ fail_pipe:
 
 	fflush(NULL);
 
-	if (cmd->close_object_store)
-		close_object_store(the_repository->objects);
+	if (cmd->odb_to_close)
+		odb_close(cmd->odb_to_close);
 
 #ifndef GIT_WINDOWS_NATIVE
 {
@@ -742,6 +761,8 @@ fail_pipe:
 			error_errno("cannot run %s", cmd->args.v[0]);
 		goto end_of_spawn;
 	}
+
+	trace_argv_printf(&argv.v[1], "trace: start_command:");
 
 	if (pipe(notify_pipe))
 		notify_pipe[0] = notify_pipe[1] = -1;
@@ -811,6 +832,17 @@ fail_pipe:
 			child_close(cmd->out);
 		}
 
+		if (cmd->close_fd_above_stderr) {
+			long max_fd = sysconf(_SC_OPEN_MAX);
+			int fd;
+			if (max_fd < 0 || max_fd > 4096)
+				max_fd = 4096;
+			for (fd = 3; fd < max_fd; fd++) {
+				if (fd != child_notifier)
+					close(fd);
+			}
+		}
+
 		if (cmd->dir && chdir(cmd->dir))
 			child_die(CHILD_ERR_CHDIR);
 
@@ -839,13 +871,9 @@ fail_pipe:
 			execve(argv.v[0], (char *const *) argv.v,
 			       (char *const *) childenv);
 
-		if (errno == ENOENT) {
-			if (cmd->silent_exec_failure)
-				child_die(CHILD_ERR_SILENT);
-			child_die(CHILD_ERR_ENOENT);
-		} else {
-			child_die(CHILD_ERR_ERRNO);
-		}
+		if (cmd->silent_exec_failure && errno == ENOENT)
+			child_die(CHILD_ERR_SILENT);
+		child_die(CHILD_ERR_ERRNO);
 	}
 	atfork_parent(&as);
 	if (cmd->pid < 0)
@@ -914,6 +942,7 @@ end_of_spawn:
 	else if (cmd->use_shell)
 		cmd->args.v = prepare_shell_cmd(&nargv, sargv);
 
+	trace_argv_printf(cmd->args.v, "trace: start_command:");
 	cmd->pid = mingw_spawnvpe(cmd->args.v[0], cmd->args.v,
 				  (char**) cmd->env.v,
 				  cmd->dir, fhin, fhout, fherr);
@@ -1003,41 +1032,6 @@ int run_command(struct child_process *cmd)
 	return finish_command(cmd);
 }
 
-int run_command_v_opt(const char **argv, int opt)
-{
-	return run_command_v_opt_cd_env(argv, opt, NULL, NULL);
-}
-
-int run_command_v_opt_tr2(const char **argv, int opt, const char *tr2_class)
-{
-	return run_command_v_opt_cd_env_tr2(argv, opt, NULL, NULL, tr2_class);
-}
-
-int run_command_v_opt_cd_env(const char **argv, int opt, const char *dir, const char *const *env)
-{
-	return run_command_v_opt_cd_env_tr2(argv, opt, dir, env, NULL);
-}
-
-int run_command_v_opt_cd_env_tr2(const char **argv, int opt, const char *dir,
-				 const char *const *env, const char *tr2_class)
-{
-	struct child_process cmd = CHILD_PROCESS_INIT;
-	strvec_pushv(&cmd.args, argv);
-	cmd.no_stdin = opt & RUN_COMMAND_NO_STDIN ? 1 : 0;
-	cmd.git_cmd = opt & RUN_GIT_CMD ? 1 : 0;
-	cmd.stdout_to_stderr = opt & RUN_COMMAND_STDOUT_TO_STDERR ? 1 : 0;
-	cmd.silent_exec_failure = opt & RUN_SILENT_EXEC_FAILURE ? 1 : 0;
-	cmd.use_shell = opt & RUN_USING_SHELL ? 1 : 0;
-	cmd.clean_on_exit = opt & RUN_CLEAN_ON_EXIT ? 1 : 0;
-	cmd.wait_after_clean = opt & RUN_WAIT_AFTER_CLEAN ? 1 : 0;
-	cmd.close_object_store = opt & RUN_CLOSE_OBJECT_STORE ? 1 : 0;
-	cmd.dir = dir;
-	if (env)
-		strvec_pushv(&cmd.env, (const char **)env);
-	cmd.trace2_child_class = tr2_class;
-	return run_command(&cmd);
-}
-
 #ifndef NO_PTHREADS
 static pthread_t main_thread;
 static int main_thread_set;
@@ -1053,7 +1047,7 @@ static void *run_thread(void *data)
 		sigset_t mask;
 		sigemptyset(&mask);
 		sigaddset(&mask, SIGPIPE);
-		if (pthread_sigmask(SIG_BLOCK, &mask, NULL) < 0) {
+		if (pthread_sigmask(SIG_BLOCK, &mask, NULL)) {
 			ret = error("unable to block SIGPIPE in async thread");
 			return (void *)ret;
 		}
@@ -1364,12 +1358,25 @@ static int pump_io_round(struct io_pump *slots, int nr, struct pollfd *pfd)
 			continue;
 
 		if (io->type == POLLOUT) {
-			ssize_t len = xwrite(io->fd,
-					     io->u.out.buf, io->u.out.len);
+			ssize_t len;
+
+			/*
+			 * Don't use xwrite() here. It loops forever on EAGAIN,
+			 * and we're in our own poll() loop here.
+			 *
+			 * Note that we lose xwrite()'s handling of MAX_IO_SIZE
+			 * and EINTR, so we have to implement those ourselves.
+			 */
+			len = write(io->fd, io->u.out.buf,
+				    io->u.out.len <= MAX_IO_SIZE ?
+				    io->u.out.len : MAX_IO_SIZE);
 			if (len < 0) {
-				io->error = errno;
-				close(io->fd);
-				io->fd = -1;
+				if (errno != EINTR && errno != EAGAIN &&
+				    errno != ENOSPC) {
+					io->error = errno;
+					close(io->fd);
+					io->fd = -1;
+				}
 			} else {
 				io->u.out.buf += len;
 				io->u.out.len -= len;
@@ -1438,6 +1445,15 @@ int pipe_command(struct child_process *cmd,
 		return -1;
 
 	if (in) {
+		if (enable_pipe_nonblock(cmd->in) < 0) {
+			error_errno("unable to make pipe non-blocking");
+			close(cmd->in);
+			if (out)
+				close(cmd->out);
+			if (err)
+				close(cmd->err);
+			return -1;
+		}
 		io[nr].fd = cmd->in;
 		io[nr].type = POLLOUT;
 		io[nr].u.out.buf = in;
@@ -1473,23 +1489,40 @@ enum child_state {
 	GIT_CP_WAIT_CLEANUP,
 };
 
-int run_processes_parallel_ungroup;
-struct parallel_processes {
+struct parallel_child {
+	enum child_state state;
+	struct child_process process;
+	struct strbuf err;
 	void *data;
+};
 
-	int max_processes;
-	int nr_processes;
+static int child_is_working(const struct parallel_child *pp_child)
+{
+	return pp_child->state == GIT_CP_WORKING;
+}
 
-	get_next_task_fn get_next_task;
-	start_failure_fn start_failure;
-	task_finished_fn task_finished;
+static int child_is_ready_for_cleanup(const struct parallel_child *pp_child)
+{
+	return child_is_working(pp_child) && !pp_child->process.in;
+}
 
-	struct {
-		enum child_state state;
-		struct child_process process;
-		struct strbuf err;
-		void *data;
-	} *children;
+static int child_is_receiving_input(const struct parallel_child *pp_child)
+{
+	return child_is_working(pp_child) && pp_child->process.in > 0;
+}
+static int child_is_sending_output(const struct parallel_child *pp_child)
+{
+	/*
+	 * all pp children which buffer output through run_command via ungroup=0
+	 * redirect stdout to stderr, so we just need to check process.err.
+	 */
+	return child_is_working(pp_child) && pp_child->process.err > 0;
+}
+
+struct parallel_processes {
+	size_t nr_processes;
+
+	struct parallel_child *children;
 	/*
 	 * The struct pollfd is logically part of *children,
 	 * but the system call expects it as its own array.
@@ -1497,81 +1530,60 @@ struct parallel_processes {
 	struct pollfd *pfd;
 
 	unsigned shutdown : 1;
-	unsigned ungroup : 1;
 
-	int output_owner;
+	size_t output_owner;
 	struct strbuf buffered_output; /* of finished children */
 };
 
-static int default_start_failure(struct strbuf *out,
-				 void *pp_cb,
-				 void *pp_task_cb)
-{
-	return 0;
-}
+struct parallel_processes_for_signal {
+	const struct run_process_parallel_opts *opts;
+	const struct parallel_processes *pp;
+};
 
-static int default_task_finished(int result,
-				 struct strbuf *out,
-				 void *pp_cb,
-				 void *pp_task_cb)
+static void kill_children(const struct parallel_processes *pp,
+			  const struct run_process_parallel_opts *opts,
+			  int signo)
 {
-	return 0;
-}
-
-static void kill_children(struct parallel_processes *pp, int signo)
-{
-	int i, n = pp->max_processes;
-
-	for (i = 0; i < n; i++)
-		if (pp->children[i].state == GIT_CP_WORKING)
+	for (size_t i = 0; i < opts->processes; i++)
+		if (child_is_working(&pp->children[i]))
 			kill(pp->children[i].process.pid, signo);
 }
 
-static struct parallel_processes *pp_for_signal;
+static void kill_children_signal(const struct parallel_processes_for_signal *pp_sig,
+				 int signo)
+{
+	kill_children(pp_sig->pp, pp_sig->opts, signo);
+}
+
+static struct parallel_processes_for_signal *pp_for_signal;
 
 static void handle_children_on_signal(int signo)
 {
-	kill_children(pp_for_signal, signo);
+	kill_children_signal(pp_for_signal, signo);
 	sigchain_pop(signo);
 	raise(signo);
 }
 
 static void pp_init(struct parallel_processes *pp,
-		    int n,
-		    get_next_task_fn get_next_task,
-		    start_failure_fn start_failure,
-		    task_finished_fn task_finished,
-		    void *data, int ungroup)
+		    const struct run_process_parallel_opts *opts,
+		    struct parallel_processes_for_signal *pp_sig)
 {
-	int i;
+	const size_t n = opts->processes;
 
-	if (n < 1)
-		n = online_cpus();
+	if (!n)
+		BUG("you must provide a non-zero number of processes!");
 
-	pp->max_processes = n;
+	trace_printf("run_processes_parallel: preparing to run up to %"PRIuMAX" tasks",
+		     (uintmax_t)n);
 
-	trace_printf("run_processes_parallel: preparing to run up to %d tasks", n);
-
-	pp->data = data;
-	if (!get_next_task)
+	if (!opts->get_next_task)
 		BUG("you need to specify a get_next_task function");
-	pp->get_next_task = get_next_task;
 
-	pp->start_failure = start_failure ? start_failure : default_start_failure;
-	pp->task_finished = task_finished ? task_finished : default_task_finished;
-
-	pp->nr_processes = 0;
-	pp->output_owner = 0;
-	pp->shutdown = 0;
-	pp->ungroup = ungroup;
 	CALLOC_ARRAY(pp->children, n);
-	if (pp->ungroup)
-		pp->pfd = NULL;
-	else
-		CALLOC_ARRAY(pp->pfd, n);
-	strbuf_init(&pp->buffered_output, 0);
+	if (!opts->ungroup)
+		CALLOC_ARRAY(pp->pfd, n * 2);
 
-	for (i = 0; i < n; i++) {
+	for (size_t i = 0; i < n; i++) {
 		strbuf_init(&pp->children[i].err, 0);
 		child_process_init(&pp->children[i].process);
 		if (pp->pfd) {
@@ -1580,16 +1592,17 @@ static void pp_init(struct parallel_processes *pp,
 		}
 	}
 
-	pp_for_signal = pp;
+	pp_sig->pp = pp;
+	pp_sig->opts = opts;
+	pp_for_signal = pp_sig;
 	sigchain_push_common(handle_children_on_signal);
 }
 
-static void pp_cleanup(struct parallel_processes *pp)
+static void pp_cleanup(struct parallel_processes *pp,
+		       const struct run_process_parallel_opts *opts)
 {
-	int i;
-
 	trace_printf("run_processes_parallel: done");
-	for (i = 0; i < pp->max_processes; i++) {
+	for (size_t i = 0; i < opts->processes; i++) {
 		strbuf_release(&pp->children[i].err);
 		child_process_clear(&pp->children[i].process);
 	}
@@ -1614,39 +1627,52 @@ static void pp_cleanup(struct parallel_processes *pp)
  * <0 no new job was started, user wishes to shutdown early. Use negative code
  *    to signal the children.
  */
-static int pp_start_one(struct parallel_processes *pp)
+static int pp_start_one(struct parallel_processes *pp,
+			const struct run_process_parallel_opts *opts)
 {
-	int i, code;
+	size_t i;
+	int code;
 
-	for (i = 0; i < pp->max_processes; i++)
+	for (i = 0; i < opts->processes; i++)
 		if (pp->children[i].state == GIT_CP_FREE)
 			break;
-	if (i == pp->max_processes)
+	if (i == opts->processes)
 		BUG("bookkeeping is hard");
 
-	code = pp->get_next_task(&pp->children[i].process,
-				 pp->ungroup ? NULL : &pp->children[i].err,
-				 pp->data,
-				 &pp->children[i].data);
+	/*
+	 * By default, do not inherit stdin from the parent process - otherwise,
+	 * all children would share stdin! Users may overwrite this to provide
+	 * something to the child's stdin by having their 'get_next_task'
+	 * callback assign 0 to .no_stdin and an appropriate integer to .in.
+	 */
+	pp->children[i].process.no_stdin = 1;
+
+	code = opts->get_next_task(&pp->children[i].process,
+				   opts->ungroup ? NULL : &pp->children[i].err,
+				   opts->data,
+				   &pp->children[i].data);
 	if (!code) {
-		if (!pp->ungroup) {
+		if (!opts->ungroup) {
 			strbuf_addbuf(&pp->buffered_output, &pp->children[i].err);
 			strbuf_reset(&pp->children[i].err);
 		}
 		return 1;
 	}
-	if (!pp->ungroup) {
+	if (!opts->ungroup) {
 		pp->children[i].process.err = -1;
 		pp->children[i].process.stdout_to_stderr = 1;
 	}
-	pp->children[i].process.no_stdin = 1;
 
 	if (start_command(&pp->children[i].process)) {
-		code = pp->start_failure(pp->ungroup ? NULL :
-					 &pp->children[i].err,
-					 pp->data,
-					 pp->children[i].data);
-		if (!pp->ungroup) {
+		if (opts->start_failure)
+			code = opts->start_failure(opts->ungroup ? NULL :
+						   &pp->children[i].err,
+						   opts->data,
+						   pp->children[i].data);
+		else
+			code = 0;
+
+		if (!opts->ungroup) {
 			strbuf_addbuf(&pp->buffered_output, &pp->children[i].err);
 			strbuf_reset(&pp->children[i].err);
 		}
@@ -1662,21 +1688,101 @@ static int pp_start_one(struct parallel_processes *pp)
 	return 0;
 }
 
-static void pp_buffer_stderr(struct parallel_processes *pp, int output_timeout)
+static void pp_buffer_stdin(struct parallel_processes *pp,
+			    const struct run_process_parallel_opts *opts)
 {
-	int i;
+	/* Buffer stdin for each pipe. */
+	for (size_t i = 0; i < opts->processes; i++) {
+		struct child_process *proc = &pp->children[i].process;
+		int ret;
 
-	while ((i = poll(pp->pfd, pp->max_processes, output_timeout)) < 0) {
+		if (!child_is_receiving_input(&pp->children[i]))
+			continue;
+
+		/*
+		 * child input is provided via path_to_stdin when the feed_pipe cb is
+		 * missing, so we just signal an EOF.
+		 */
+		if (!opts->feed_pipe) {
+			close(proc->in);
+			proc->in = 0;
+			continue;
+		}
+
+		/**
+		 * Feed the pipe:
+		 *   ret < 0 means error
+		 *   ret == 0 means there is more data to be fed
+		 *   ret > 0 means feeding finished
+		 */
+		ret = opts->feed_pipe(proc->in, opts->data, pp->children[i].data);
+		if (ret < 0)
+			die_errno("feed_pipe");
+
+		if (ret) {
+			close(proc->in);
+			proc->in = 0;
+		}
+	}
+}
+
+static void pp_buffer_io(struct parallel_processes *pp,
+			 const struct run_process_parallel_opts *opts,
+			 int timeout)
+{
+	/* for each potential child slot, prepare two pollfd entries */
+	for (size_t i = 0; i < opts->processes; i++) {
+		if (child_is_sending_output(&pp->children[i])) {
+			pp->pfd[2*i].fd = pp->children[i].process.err;
+			pp->pfd[2*i].events = POLLIN | POLLHUP;
+		} else {
+			pp->pfd[2*i].fd = -1;
+		}
+
+		if (child_is_receiving_input(&pp->children[i])) {
+			pp->pfd[2*i+1].fd = pp->children[i].process.in;
+			pp->pfd[2*i+1].events = POLLOUT;
+		} else {
+			pp->pfd[2*i+1].fd = -1;
+		}
+	}
+
+	while (poll(pp->pfd, opts->processes * 2, timeout) < 0) {
 		if (errno == EINTR)
 			continue;
-		pp_cleanup(pp);
+		pp_cleanup(pp, opts);
 		die_errno("poll");
 	}
 
-	/* Buffer output from all pipes. */
-	for (i = 0; i < pp->max_processes; i++) {
-		if (pp->children[i].state == GIT_CP_WORKING &&
-		    pp->pfd[i].revents & (POLLIN | POLLHUP)) {
+	for (size_t i = 0; i < opts->processes; i++) {
+		/* Handle input feeding (stdin) */
+		if (pp->pfd[2*i+1].revents & (POLLOUT | POLLHUP | POLLERR)) {
+			if (opts->feed_pipe) {
+				int ret = opts->feed_pipe(pp->children[i].process.in,
+							  opts->data,
+							  pp->children[i].data);
+				if (ret < 0)
+					die_errno("feed_pipe");
+				if (ret) {
+					/* done feeding */
+					close(pp->children[i].process.in);
+					pp->children[i].process.in = 0;
+				}
+			} else {
+				/*
+				 * No feed_pipe means there is nothing to do, so
+				 * close the fd. Child input can be fed by other
+				 * methods, such as opts->path_to_stdin which
+				 * slurps a file via dup2, so clean up here.
+				 */
+				close(pp->children[i].process.in);
+				pp->children[i].process.in = 0;
+			}
+		}
+
+		/* Handle output reading (stderr) */
+		if (child_is_working(&pp->children[i]) &&
+		    pp->pfd[2*i].revents & (POLLIN | POLLHUP)) {
 			int n = strbuf_read_once(&pp->children[i].err,
 						 pp->children[i].process.err, 0);
 			if (n == 0) {
@@ -1689,35 +1795,39 @@ static void pp_buffer_stderr(struct parallel_processes *pp, int output_timeout)
 	}
 }
 
-static void pp_output(struct parallel_processes *pp)
+static void pp_output(const struct parallel_processes *pp)
 {
-	int i = pp->output_owner;
+	size_t i = pp->output_owner;
 
-	if (pp->children[i].state == GIT_CP_WORKING &&
+	if (child_is_working(&pp->children[i]) &&
 	    pp->children[i].err.len) {
 		strbuf_write(&pp->children[i].err, stderr);
 		strbuf_reset(&pp->children[i].err);
 	}
 }
 
-static int pp_collect_finished(struct parallel_processes *pp)
+static int pp_collect_finished(struct parallel_processes *pp,
+			       const struct run_process_parallel_opts *opts)
 {
-	int i, code;
-	int n = pp->max_processes;
+	int code;
+	size_t i;
 	int result = 0;
 
 	while (pp->nr_processes > 0) {
-		for (i = 0; i < pp->max_processes; i++)
+		for (i = 0; i < opts->processes; i++)
 			if (pp->children[i].state == GIT_CP_WAIT_CLEANUP)
 				break;
-		if (i == pp->max_processes)
+		if (i == opts->processes)
 			break;
 
 		code = finish_command(&pp->children[i].process);
 
-		code = pp->task_finished(code, pp->ungroup ? NULL :
-					 &pp->children[i].err, pp->data,
-					 pp->children[i].data);
+		if (opts->task_finished)
+			code = opts->task_finished(code, opts->ungroup ? NULL :
+						   &pp->children[i].err, opts->data,
+						   pp->children[i].data);
+		else
+			code = 0;
 
 		if (code)
 			result = code;
@@ -1728,14 +1838,17 @@ static int pp_collect_finished(struct parallel_processes *pp)
 		pp->children[i].state = GIT_CP_FREE;
 		if (pp->pfd)
 			pp->pfd[i].fd = -1;
+		pp->children[i].process.in = 0;
 		child_process_init(&pp->children[i].process);
 
-		if (pp->ungroup) {
+		if (opts->ungroup) {
 			; /* no strbuf_*() work to do here */
 		} else if (i != pp->output_owner) {
 			strbuf_addbuf(&pp->buffered_output, &pp->children[i].err);
 			strbuf_reset(&pp->children[i].err);
 		} else {
+			const size_t n = opts->processes;
+
 			strbuf_write(&pp->children[i].err, stderr);
 			strbuf_reset(&pp->children[i].err);
 
@@ -1752,7 +1865,7 @@ static int pp_collect_finished(struct parallel_processes *pp)
 			 * running process time.
 			 */
 			for (i = 0; i < n; i++)
-				if (pp->children[(pp->output_owner + i) % n].state == GIT_CP_WORKING)
+				if (child_is_working(&pp->children[(pp->output_owner + i) % n]))
 					break;
 			pp->output_owner = (pp->output_owner + i) % n;
 		}
@@ -1760,96 +1873,126 @@ static int pp_collect_finished(struct parallel_processes *pp)
 	return result;
 }
 
-int run_processes_parallel(int n,
-			   get_next_task_fn get_next_task,
-			   start_failure_fn start_failure,
-			   task_finished_fn task_finished,
-			   void *pp_cb)
+static void pp_handle_child_IO(struct parallel_processes *pp,
+				const struct run_process_parallel_opts *opts,
+				int timeout)
+{
+	if (opts->ungroup) {
+		pp_buffer_stdin(pp, opts);
+		for (size_t i = 0; i < opts->processes; i++)
+			if (child_is_ready_for_cleanup(&pp->children[i]))
+				pp->children[i].state = GIT_CP_WAIT_CLEANUP;
+	} else {
+		pp_buffer_io(pp, opts, timeout);
+		pp_output(pp);
+	}
+}
+
+void run_processes_parallel(const struct run_process_parallel_opts *opts)
 {
 	int i, code;
-	int output_timeout = 100;
+	int timeout = 100;
 	int spawn_cap = 4;
-	int ungroup = run_processes_parallel_ungroup;
-	struct parallel_processes pp;
+	struct parallel_processes_for_signal pp_sig;
+	struct parallel_processes pp = {
+		.buffered_output = STRBUF_INIT,
+	};
+	/* options */
+	const char *tr2_category = opts->tr2_category;
+	const char *tr2_label = opts->tr2_label;
+	const int do_trace2 = tr2_category && tr2_label;
 
-	/* unset for the next API user */
-	run_processes_parallel_ungroup = 0;
+	if (do_trace2)
+		trace2_region_enter_printf(tr2_category, tr2_label, NULL,
+					   "max:%"PRIuMAX,
+					   (uintmax_t)opts->processes);
 
-	pp_init(&pp, n, get_next_task, start_failure, task_finished, pp_cb,
-		ungroup);
+	pp_init(&pp, opts, &pp_sig);
+
+	/*
+	 * Child tasks might receive input via stdin, terminating early (or not), so
+	 * ignore the default SIGPIPE which gets handled by each feed_pipe_fn which
+	 * actually writes the data to children stdin fds.
+	 *
+	 * This _must_ come after pp_init(), because it installs its own
+	 * SIGPIPE handler (to cleanup children), and we want to supersede
+	 * that.
+	 */
+	sigchain_push(SIGPIPE, SIG_IGN);
+
 	while (1) {
 		for (i = 0;
 		    i < spawn_cap && !pp.shutdown &&
-		    pp.nr_processes < pp.max_processes;
+		    pp.nr_processes < opts->processes;
 		    i++) {
-			code = pp_start_one(&pp);
+			code = pp_start_one(&pp, opts);
 			if (!code)
 				continue;
 			if (code < 0) {
 				pp.shutdown = 1;
-				kill_children(&pp, -code);
+				kill_children(&pp, opts, -code);
 			}
 			break;
 		}
 		if (!pp.nr_processes)
 			break;
-		if (ungroup) {
-			int i;
-
-			for (i = 0; i < pp.max_processes; i++)
-				pp.children[i].state = GIT_CP_WAIT_CLEANUP;
-		} else {
-			pp_buffer_stderr(&pp, output_timeout);
-			pp_output(&pp);
-		}
-		code = pp_collect_finished(&pp);
+		pp_handle_child_IO(&pp, opts, timeout);
+		code = pp_collect_finished(&pp, opts);
 		if (code) {
 			pp.shutdown = 1;
 			if (code < 0)
-				kill_children(&pp, -code);
+				kill_children(&pp, opts,-code);
 		}
 	}
 
-	pp_cleanup(&pp);
-	return 0;
+	sigchain_pop(SIGPIPE);
+
+	pp_cleanup(&pp, opts);
+
+	if (do_trace2)
+		trace2_region_leave(tr2_category, tr2_label, NULL);
 }
 
-int run_processes_parallel_tr2(int n, get_next_task_fn get_next_task,
-			       start_failure_fn start_failure,
-			       task_finished_fn task_finished, void *pp_cb,
-			       const char *tr2_category, const char *tr2_label)
+int prepare_auto_maintenance(struct repository *r, int quiet,
+			     struct child_process *maint)
 {
-	int result;
+	int enabled = 1, auto_detach;
 
-	trace2_region_enter_printf(tr2_category, tr2_label, NULL, "max:%d",
-				   ((n < 1) ? online_cpus() : n));
-
-	result = run_processes_parallel(n, get_next_task, start_failure,
-					task_finished, pp_cb);
-
-	trace2_region_leave(tr2_category, tr2_label, NULL);
-
-	return result;
-}
-
-int run_auto_maintenance(int quiet)
-{
-	int enabled;
-	struct child_process maint = CHILD_PROCESS_INIT;
-
-	if (!git_config_get_bool("maintenance.auto", &enabled) &&
-	    !enabled)
+	if (repo_config_get_bool(r, "maintenance.auto", &enabled)) {
+		int gc_threshold;
+		if (!repo_config_get_int(r, "gc.auto", &gc_threshold))
+			enabled = gc_threshold > 0;
+	}
+	if (!enabled)
 		return 0;
 
-	maint.git_cmd = 1;
-	maint.close_object_store = 1;
-	strvec_pushl(&maint.args, "maintenance", "run", "--auto", NULL);
-	strvec_push(&maint.args, quiet ? "--quiet" : "--no-quiet");
+	/*
+	 * When `maintenance.autoDetach` isn't set, then we fall back to
+	 * honoring `gc.autoDetach`. This is somewhat weird, but required to
+	 * retain behaviour from when we used to run git-gc(1) here.
+	 */
+	if (repo_config_get_bool(r, "maintenance.autodetach", &auto_detach) &&
+	    repo_config_get_bool(r, "gc.autodetach", &auto_detach))
+		auto_detach = git_env_bool("GIT_TEST_MAINT_AUTO_DETACH", true);
 
+	maint->git_cmd = 1;
+	maint->odb_to_close = r->objects;
+	strvec_pushl(&maint->args, "maintenance", "run", "--auto", NULL);
+	strvec_push(&maint->args, quiet ? "--quiet" : "--no-quiet");
+	strvec_push(&maint->args, auto_detach ? "--detach" : "--no-detach");
+
+	return 1;
+}
+
+int run_auto_maintenance(struct repository *r, int quiet)
+{
+	struct child_process maint = CHILD_PROCESS_INIT;
+	if (!prepare_auto_maintenance(r, quiet, &maint))
+		return 0;
 	return run_command(&maint);
 }
 
-void prepare_other_repo_env(struct strvec *env, const char *new_git_dir)
+void sanitize_repo_env(struct strvec *env)
 {
 	const char * const *var;
 
@@ -1858,6 +2001,11 @@ void prepare_other_repo_env(struct strvec *env, const char *new_git_dir)
 		    strcmp(*var, CONFIG_COUNT_ENVIRONMENT))
 			strvec_push(env, *var);
 	}
+}
+
+void prepare_other_repo_env(struct strvec *env, const char *new_git_dir)
+{
+	sanitize_repo_env(env);
 	strvec_pushf(env, "%s=%s", GIT_DIR_ENVIRONMENT, new_git_dir);
 }
 
@@ -1895,7 +2043,7 @@ enum start_bg_result start_bg_command(struct child_process *cmd,
 		 *
 		 * We also assume that `start_command()` does not add
 		 * us to the cleanup list.  And that it calls
-		 * calls `child_process_clear()`.
+		 * `child_process_clear()`.
 		 */
 		sbgr = SBGR_ERROR;
 		goto done;

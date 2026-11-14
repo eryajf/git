@@ -5,7 +5,6 @@
 
 test_description='Test of git add, including the -- option.'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 . "$TEST_DIRECTORY"/lib-unique-files.sh
@@ -24,17 +23,28 @@ test_mode_in_index () {
 	esac
 }
 
-test_expect_success \
-    'Test of git add' \
-    'touch foo && git add foo'
+test_expect_success 'Test of git add' '
+	touch foo && git add foo
+'
 
-test_expect_success \
-    'Post-check that foo is in the index' \
-    'git ls-files foo | grep foo'
+test_expect_success 'Test with no pathspecs' '
+	cat >expect <<-EOF &&
+	Nothing specified, nothing added.
+	hint: Maybe you wanted to say ${SQ}git add .${SQ}?
+	hint: Disable this message with "git config set --global advice.addEmptyPathspec false"
+	EOF
+	git add 2>actual &&
+	test_cmp expect actual
+'
 
-test_expect_success \
-    'Test that "git add -- -q" works' \
-    'touch -- -q && git add -- -q'
+test_expect_success 'Post-check that foo is in the index' '
+	git ls-files foo >actual &&
+	test_grep foo actual
+'
+
+test_expect_success 'Test that "git add -- -q" works' '
+	touch -- -q && git add -- -q
+'
 
 BATCH_CONFIGURATION='-c core.fsync=loose-object -c core.fsyncmethod=batch'
 
@@ -106,24 +116,32 @@ test_expect_success '.gitignore test setup' '
 
 test_expect_success '.gitignore is honored' '
 	git add . &&
-	! (git ls-files | grep "\\.ig")
+	git ls-files >files &&
+	sed -n "/\\.ig/p" <files >actual &&
+	test_must_be_empty actual
 '
 
 test_expect_success 'error out when attempting to add ignored ones without -f' '
 	test_must_fail git add a.?? &&
-	! (git ls-files | grep "\\.ig")
+	git ls-files >files &&
+	sed -n "/\\.ig/p" <files >actual &&
+	test_must_be_empty actual
 '
 
 test_expect_success 'error out when attempting to add ignored ones without -f' '
 	test_must_fail git add d.?? &&
-	! (git ls-files | grep "\\.ig")
+	git ls-files >files &&
+	sed -n "/\\.ig/p" <files >actual &&
+	test_must_be_empty actual
 '
 
 test_expect_success 'error out when attempting to add ignored ones but add others' '
 	touch a.if &&
 	test_must_fail git add a.?? &&
-	! (git ls-files | grep "\\.ig") &&
-	(git ls-files | grep a.if)
+	git ls-files >files &&
+	sed -n "/\\.ig/p" <files >actual &&
+	test_must_be_empty actual &&
+	test_grep a.if files
 '
 
 test_expect_success 'add ignored ones with -f' '
@@ -178,8 +196,9 @@ test_expect_success 'git add with filemode=0, symlinks=0, and unmerged entries' 
 	echo new > file &&
 	echo new > symlink &&
 	git add file symlink &&
-	git ls-files --stage | grep "^100755 .* 0	file$" &&
-	git ls-files --stage | grep "^120000 .* 0	symlink$"
+	git ls-files --stage >actual &&
+	test_grep "^100755 .* 0	file$" actual &&
+	test_grep "^120000 .* 0	symlink$" actual
 '
 
 test_expect_success 'git add with filemode=0, symlinks=0 prefers stage 2 over stage 1' '
@@ -195,8 +214,9 @@ test_expect_success 'git add with filemode=0, symlinks=0 prefers stage 2 over st
 	echo new > file &&
 	echo new > symlink &&
 	git add file symlink &&
-	git ls-files --stage | grep "^100755 .* 0	file$" &&
-	git ls-files --stage | grep "^120000 .* 0	symlink$"
+	git ls-files --stage >actual &&
+	test_grep "^100755 .* 0	file$" actual &&
+	test_grep "^120000 .* 0	symlink$" actual
 '
 
 test_expect_success 'git add --refresh' '
@@ -221,8 +241,8 @@ test_expect_success 'git add --refresh with pathspec' '
 	test_must_be_empty actual &&
 
 	git diff-files --name-only >actual &&
-	! grep bar actual &&
-	grep baz actual
+	test_grep ! bar actual &&
+	test_grep baz actual
 '
 
 test_expect_success 'git add --refresh correctly reports no match error' "
@@ -237,7 +257,8 @@ test_expect_success POSIXPERM,SANITY 'git add should fail atomically upon an unr
 	date >foo2 &&
 	chmod 0 foo2 &&
 	test_must_fail git add --verbose . &&
-	! ( git ls-files foo1 | grep foo1 )
+	git ls-files foo1 >actual &&
+	test_grep ! foo1 actual
 '
 
 rm -f foo2
@@ -248,7 +269,8 @@ test_expect_success POSIXPERM,SANITY 'git add --ignore-errors' '
 	date >foo2 &&
 	chmod 0 foo2 &&
 	test_must_fail git add --verbose --ignore-errors . &&
-	git ls-files foo1 | grep foo1
+	git ls-files foo1 >actual &&
+	test_grep foo1 actual
 '
 
 rm -f foo2
@@ -260,7 +282,8 @@ test_expect_success POSIXPERM,SANITY 'git add (add.ignore-errors)' '
 	date >foo2 &&
 	chmod 0 foo2 &&
 	test_must_fail git add --verbose . &&
-	git ls-files foo1 | grep foo1
+	git ls-files foo1 >actual &&
+	test_grep foo1 actual
 '
 rm -f foo2
 
@@ -271,19 +294,21 @@ test_expect_success POSIXPERM,SANITY 'git add (add.ignore-errors = false)' '
 	date >foo2 &&
 	chmod 0 foo2 &&
 	test_must_fail git add --verbose . &&
-	! ( git ls-files foo1 | grep foo1 )
+	git ls-files foo1 >actual &&
+	test_grep ! foo1 actual
 '
 rm -f foo2
 
 test_expect_success POSIXPERM,SANITY '--no-ignore-errors overrides config' '
-       git config add.ignore-errors 1 &&
-       git reset --hard &&
-       date >foo1 &&
-       date >foo2 &&
-       chmod 0 foo2 &&
-       test_must_fail git add --verbose --no-ignore-errors . &&
-       ! ( git ls-files foo1 | grep foo1 ) &&
-       git config add.ignore-errors 0
+	git config add.ignore-errors 1 &&
+	git reset --hard &&
+	date >foo1 &&
+	date >foo2 &&
+	chmod 0 foo2 &&
+	test_must_fail git add --verbose --no-ignore-errors . &&
+	git ls-files foo1 >actual &&
+	test_grep ! foo1 actual &&
+	git config add.ignore-errors 0
 '
 rm -f foo2
 
@@ -291,8 +316,10 @@ test_expect_success BSLASHPSPEC "git add 'fo\\[ou\\]bar' ignores foobar" '
 	git reset --hard &&
 	touch fo\[ou\]bar foobar &&
 	git add '\''fo\[ou\]bar'\'' &&
-	git ls-files fo\[ou\]bar | fgrep fo\[ou\]bar &&
-	! ( git ls-files foobar | grep foobar )
+	git ls-files fo\[ou\]bar >actual &&
+	test_grep -F fo\[ou\]bar actual &&
+	git ls-files foobar >actual &&
+	test_grep ! foobar actual
 '
 
 test_expect_success 'git add to resolve conflicts on otherwise ignored path' '
@@ -309,7 +336,8 @@ test_expect_success 'git add to resolve conflicts on otherwise ignored path' '
 
 test_expect_success '"add non-existent" should fail' '
 	test_must_fail git add non-existent &&
-	! (git ls-files | grep "non-existent")
+	git ls-files >actual &&
+	test_grep ! "non-existent" actual
 '
 
 test_expect_success 'git add -A on empty repo does not error out' '
@@ -331,12 +359,47 @@ test_expect_success '"git add ." in empty repo' '
 	)
 '
 
+test_expect_success '"git add" a embedded repository' '
+	rm -fr outer && git init outer &&
+	(
+		cd outer &&
+		for i in 1 2
+		do
+			name=inner$i &&
+			git init $name &&
+			git -C $name commit --allow-empty -m $name ||
+				return 1
+		done &&
+		git add . 2>actual &&
+		cat >expect <<-EOF &&
+		warning: adding embedded git repository: inner1
+		hint: You${SQ}ve added another git repository inside your current repository.
+		hint: Clones of the outer repository will not contain the contents of
+		hint: the embedded repository and will not know how to obtain it.
+		hint: If you meant to add a submodule, use:
+		hint:
+		hint: 	git submodule add <url> inner1
+		hint:
+		hint: If you added this path by mistake, you can remove it from the
+		hint: index with:
+		hint:
+		hint: 	git rm --cached inner1
+		hint:
+		hint: See "git help submodule" for more information.
+		hint: Disable this message with "git config set --global advice.addEmbeddedRepo false"
+		warning: adding embedded git repository: inner2
+		EOF
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'error on a repository with no commits' '
 	rm -fr empty &&
 	git init empty &&
 	test_must_fail git add empty >actual 2>&1 &&
 	cat >expect <<-EOF &&
 	error: '"'empty/'"' does not have a commit checked out
+	error: unable to index file '"'empty/'"'
 	fatal: adding files failed
 	EOF
 	test_cmp expect actual
@@ -362,8 +425,7 @@ cat >expect.err <<\EOF
 The following paths are ignored by one of your .gitignore files:
 ignored-file
 hint: Use -f if you really want to add them.
-hint: Turn this message off by running
-hint: "git config advice.addIgnoredFile false"
+hint: Disable this message with "git config set --global advice.addIgnoredFile false"
 EOF
 cat >expect.out <<\EOF
 add 'track-this'
@@ -430,7 +492,7 @@ test_expect_success 'git add --chmod fails with non regular files (but updates t
 	test_ln_s_add foo foo3 &&
 	touch foo4 &&
 	test_must_fail git add --chmod=+x foo3 foo4 2>stderr &&
-	test_i18ngrep "cannot chmod +x .foo3." stderr &&
+	test_grep "cannot chmod +x .foo3." stderr &&
 	test_mode_in_index 120000 foo3 &&
 	test_mode_in_index 100755 foo4
 '
@@ -447,12 +509,12 @@ test_expect_success 'git add --chmod --dry-run reports error for non regular fil
 	git reset --hard &&
 	test_ln_s_add foo foo4 &&
 	test_must_fail git add --chmod=+x --dry-run foo4 2>stderr &&
-	test_i18ngrep "cannot chmod +x .foo4." stderr
+	test_grep "cannot chmod +x .foo4." stderr
 '
 
 test_expect_success 'git add --chmod --dry-run reports error for unmatched pathspec' '
 	test_must_fail git add --chmod=+x --dry-run nonexistent 2>stderr &&
-	test_i18ngrep "pathspec .nonexistent. did not match any files" stderr
+	test_grep "pathspec .nonexistent. did not match any files" stderr
 '
 
 test_expect_success 'no file status change if no pathspec is given' '
@@ -485,9 +547,36 @@ test_expect_success 'all statuses changed in folder if . is given' '
 		touch x y z sub/a sub/dir/b &&
 		git add -A &&
 		git add --chmod=+x . &&
-		test $(git ls-files --stage | grep ^100644 | wc -l) -eq 0 &&
+		git ls-files --stage >actual &&
+		test_grep ! ^100644 actual &&
 		git add --chmod=-x . &&
-		test $(git ls-files --stage | grep ^100755 | wc -l) -eq 0
+		git ls-files --stage >actual &&
+		test_grep ! ^100755 actual
+	)
+'
+
+test_expect_success 'cannot add a submodule of a different algorithm' '
+	git init --object-format=sha256 sha256 &&
+	(
+		cd sha256 &&
+		test_commit abc &&
+		git init --object-format=sha1 submodule &&
+		test_commit -C submodule def &&
+		test_must_fail git add submodule 2>err &&
+		test_grep "cannot add a submodule of a different hash algorithm" err &&
+		git ls-files --stage >entries &&
+		test_grep ! ^160000 entries
+	) &&
+	git init --object-format=sha1 sha1 &&
+	(
+		cd sha1 &&
+		test_commit abc &&
+		git init --object-format=sha256 submodule &&
+		test_commit -C submodule def &&
+		test_must_fail git add submodule 2>err &&
+		test_grep "cannot add a submodule of a different hash algorithm" err &&
+		git ls-files --stage >entries &&
+		test_grep ! ^160000 entries
 	)
 '
 

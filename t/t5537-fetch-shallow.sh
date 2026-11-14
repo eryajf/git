@@ -135,6 +135,28 @@ test_expect_success 'fetch that requires changes in .git/shallow is filtered' '
 	)
 '
 
+test_expect_success 'fetch.writeCommitGraph skips refs that require changes in .git/shallow' '
+	git clone --no-local --depth=2 .git shallow-graph &&
+	git -C shallow-graph checkout --orphan no-shallow &&
+	test_commit -C shallow-graph --no-tag no-shallow &&
+	git init notshallow-graph &&
+	git -C notshallow-graph -c fetch.writeCommitGraph=true \
+		fetch ../shallow-graph/.git "refs/heads/*:refs/remotes/shallow/*" &&
+	test_commit -C shallow-graph --no-tag no-shallow-2 &&
+	rejected=$(git -C shallow-graph rev-parse main) &&
+	(
+		cd notshallow-graph &&
+		git -c fetch.writeCommitGraph=true \
+			fetch ../shallow-graph/.git "refs/heads/*:refs/remotes/shallow/*" &&
+		git for-each-ref --format="%(refname)" >actual.refs &&
+		echo refs/remotes/shallow/no-shallow >expect.refs &&
+		test_cmp expect.refs actual.refs &&
+		test-tool read-graph commit-info shallow/no-shallow &&
+		test_expect_code 1 \
+			test-tool read-graph commit-info $rejected 2>/dev/null
+	)
+'
+
 test_expect_success 'fetch --update-shallow' '
 	(
 	cd shallow &&
@@ -162,6 +184,8 @@ test_expect_success 'fetch --update-shallow' '
 '
 
 test_expect_success 'fetch --update-shallow into a repo with submodules' '
+	test_config_global protocol.file.allow always &&
+
 	git init a-submodule &&
 	test_commit -C a-submodule foo &&
 
@@ -175,7 +199,8 @@ test_expect_success 'fetch --update-shallow into a repo with submodules' '
 test_expect_success 'fetch --update-shallow a commit that is also a shallow point into a repo with submodules' '
 	test_when_finished "rm -rf repo-with-sub" &&
 	git init repo-with-sub &&
-	git -C repo-with-sub submodule add ../a-submodule a-submodule &&
+	git -c protocol.file.allow=always -C repo-with-sub \
+		submodule add ../a-submodule a-submodule &&
 	git -C repo-with-sub commit -m "added submodule" &&
 
 	SHALLOW=$(cat shallow/.git/shallow) &&
@@ -241,11 +266,21 @@ test_expect_success '.git/shallow is edited by repack' '
 		origin "+refs/heads/*:refs/remotes/origin/*" &&
 	git -C shallow-client repack -adfl &&
 	test_must_fail git -C shallow-client rev-parse --verify $d^0 &&
-	! grep $d shallow-client/.git/shallow &&
+	test_grep ! $d shallow-client/.git/shallow &&
 
 	git -C shallow-server branch branch-orig $d &&
 	git -C shallow-client fetch --prune --depth=2 \
 		origin "+refs/heads/*:refs/remotes/origin/*"
+'
+
+test_expect_success 'fetch --deepen does not truncate' '
+	git clone --no-local .git full-clone &&
+	git -C full-clone rev-parse --is-shallow-repository >expect &&
+	git -C full-clone log --oneline >>expect &&
+	git -C full-clone fetch --deepen=1 &&
+	git -C full-clone rev-parse --is-shallow-repository >actual &&
+	git -C full-clone log --oneline >>actual &&
+	test_cmp expect actual
 '
 
 . "$TEST_DIRECTORY"/lib-httpd.sh
@@ -268,22 +303,21 @@ test_expect_success 'shallow fetches check connectivity before writing shallow f
 	git -C "$REPO" config protocol.version 2 &&
 	git -C client config protocol.version 2 &&
 
-	git -C client fetch --depth=2 "$HTTPD_URL/one_time_perl/repo" main:a_branch &&
+	git -C client fetch --depth=2 "$HTTPD_URL/one_time_script/repo" main:a_branch &&
 
 	# Craft a situation in which the server sends back an unshallow request
 	# with an empty packfile. This is done by refetching with a shorter
 	# depth (to ensure that the packfile is empty), and overwriting the
 	# shallow line in the response with the unshallow line we want.
-	printf "$(test_oid perl)" \
-	       "$(git -C "$REPO" rev-parse HEAD)" \
-	       "$(git -C "$REPO" rev-parse HEAD^)" \
-	       >"$HTTPD_ROOT_PATH/one-time-perl" &&
+	write_script "$HTTPD_ROOT_PATH/one-time-script" <<-EOF &&
+	sed "$(printf "$(test_oid perl)" "$(git -C "$REPO" rev-parse HEAD)" "$(git -C "$REPO" rev-parse HEAD^)")" "\$1"
+	EOF
 	test_must_fail env GIT_TEST_SIDEBAND_ALL=0 git -C client \
-		fetch --depth=1 "$HTTPD_URL/one_time_perl/repo" \
+		fetch --depth=1 "$HTTPD_URL/one_time_script/repo" \
 		main:a_branch &&
 
-	# Ensure that the one-time-perl script was used.
-	! test -e "$HTTPD_ROOT_PATH/one-time-perl" &&
+	# Ensure that the one-time-script script was used.
+	! test -e "$HTTPD_ROOT_PATH/one-time-script" &&
 
 	# Ensure that the resulting repo is consistent, despite our failure to
 	# fetch.

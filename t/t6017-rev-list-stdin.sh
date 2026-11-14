@@ -48,7 +48,9 @@ test_expect_success setup '
 			git add file-$i &&
 			test_tick &&
 			git commit -m side-$i || exit
-		done
+		done &&
+
+		git update-ref refs/heads/-dashed-branch HEAD
 	)
 '
 
@@ -60,6 +62,13 @@ check side-1 ^side-7 -- file-2
 check side-3 ^side-4 -- file-3
 check side-3 ^side-2
 check side-3 ^side-2 -- file-1
+check --all
+check --all --not --branches
+check --glob=refs/heads
+check --glob=refs/heads --
+check --glob=refs/heads -- file-1
+check --end-of-options -dashed-branch
+check --all --not refs/heads/main
 
 test_expect_success 'not only --stdin' '
 	cat >expect <<-EOF &&
@@ -75,6 +84,85 @@ test_expect_success 'not only --stdin' '
 	EOF
 	git log --pretty=tformat:%s --name-only --stdin main -- file-1 \
 		<input >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'pseudo-opt with missing value' '
+	cat >input <<-EOF &&
+	--glob
+	refs/heads
+	EOF
+
+	cat >expect <<-EOF &&
+	fatal: Option ${SQ}--glob${SQ} requires a value
+	EOF
+
+	test_must_fail git rev-list --stdin <input 2>error &&
+	test_cmp expect error
+'
+
+test_expect_success 'pseudo-opt with invalid value' '
+	cat >input <<-EOF &&
+	--no-walk=garbage
+	EOF
+
+	cat >expect <<-EOF &&
+	error: invalid argument to --no-walk
+	fatal: invalid option ${SQ}--no-walk=garbage${SQ} in --stdin mode
+	EOF
+
+	test_must_fail git rev-list --stdin <input 2>error &&
+	test_cmp expect error
+'
+
+test_expect_success 'unknown option without --end-of-options' '
+	cat >input <<-EOF &&
+	-dashed-branch
+	EOF
+
+	cat >expect <<-EOF &&
+	fatal: invalid option ${SQ}-dashed-branch${SQ} in --stdin mode
+	EOF
+
+	test_must_fail git rev-list --stdin <input 2>error &&
+	test_cmp expect error
+'
+
+test_expect_success '--not on command line does not influence revisions read via --stdin' '
+	cat >input <<-EOF &&
+	refs/heads/main
+	EOF
+	git rev-list refs/heads/main >expect &&
+
+	git rev-list refs/heads/main --not --stdin <input >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--not via stdin does not influence revisions from command line' '
+	cat >input <<-EOF &&
+	--not
+	EOF
+	git rev-list refs/heads/main >expect &&
+
+	git rev-list refs/heads/main --stdin refs/heads/main <input >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--no-walk filters by path (single commit, match)' '
+	git rev-parse side-1 >expect &&
+	git rev-list --no-walk side-1 -- file-1 >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--no-walk filters by path (single commit, no match)' '
+	git rev-list --no-walk side-2 -- file-1 >actual &&
+	test_must_be_empty actual
+'
+
+test_expect_success '--no-walk with pathspec exclusion' '
+	git rev-parse side-3 side-2 >expect &&
+	git rev-parse side-1 side-2 side-3 >input &&
+	git rev-list --stdin --no-walk -- ":!file-1" <input >actual &&
 	test_cmp expect actual
 '
 

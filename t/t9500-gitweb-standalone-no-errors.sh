@@ -627,6 +627,7 @@ test_expect_success \
 test_expect_success 'setup' '
 	version=$(git config core.repositoryformatversion) &&
 	algo=$(test_might_fail git config extensions.objectformat) &&
+	refstorage=$(test_might_fail git config extensions.refstorage) &&
 	cat >.git/config <<-\EOF &&
 	# testing noval and alternate separator
 	[gitweb]
@@ -637,6 +638,10 @@ test_expect_success 'setup' '
 	if test -n "$algo"
 	then
 		git config extensions.objectformat "$algo"
+	fi &&
+	if test -n "$refstorage"
+	then
+		git config extensions.refstorage "$refstorage"
 	fi
 '
 
@@ -695,19 +700,17 @@ test_expect_success \
 # ----------------------------------------------------------------------
 # syntax highlighting
 
+test_lazy_prereq HIGHLIGHT '
+	highlight_version=$(highlight --version </dev/null 2>/dev/null) &&
+	test -n "$highlight_version"
+'
 
-highlight_version=$(highlight --version </dev/null 2>/dev/null)
-if [ $? -eq 127 ]; then
-	say "Skipping syntax highlighting tests: 'highlight' not found"
-elif test -z "$highlight_version"; then
-	say "Skipping syntax highlighting tests: incorrect 'highlight' found"
-else
-	test_set_prereq HIGHLIGHT
+test_expect_success HIGHLIGHT '
 	cat >>gitweb_config.perl <<-\EOF
 	our $highlight_bin = "highlight";
-	$feature{'highlight'}{'override'} = 1;
+	$feature{"highlight"}{"override"} = 1;
 	EOF
-fi
+'
 
 test_expect_success HIGHLIGHT \
 	'syntax highlighting (no highlight, unknown syntax)' \

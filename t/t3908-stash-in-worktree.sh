@@ -5,7 +5,6 @@
 
 test_description='Test git stash in a worktree'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -22,7 +21,7 @@ test_expect_success 'apply in subdirectory' '
 		git stash &&
 		git stash apply >out
 	) &&
-	grep "\.\.\/initial\.t" wt/subdir/out
+	test_grep "\.\.\/initial\.t" wt/subdir/out
 '
 
 test_done

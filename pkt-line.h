@@ -1,9 +1,7 @@
 #ifndef PKTLINE_H
 #define PKTLINE_H
 
-#include "git-compat-util.h"
 #include "strbuf.h"
-#include "sideband.h"
 
 /*
  * Write a packetized stream, where each line is preceded by
@@ -32,7 +30,13 @@ void packet_buf_write(struct strbuf *buf, const char *fmt, ...) __attribute__((f
 int packet_flush_gently(int fd);
 int packet_write_fmt_gently(int fd, const char *fmt, ...) __attribute__((format (printf, 2, 3)));
 int write_packetized_from_fd_no_flush(int fd_in, int fd_out);
-int write_packetized_from_buf_no_flush(const char *src_in, size_t len, int fd_out);
+int write_packetized_from_buf_no_flush_count(const char *src_in, size_t len,
+					     int fd_out, int *packet_counter);
+static inline int write_packetized_from_buf_no_flush(const char *src_in,
+						     size_t len, int fd_out)
+{
+	return write_packetized_from_buf_no_flush_count(src_in, len, fd_out, NULL);
+}
 
 /*
  * Stdio versions of packet_write functions. When mixing these with fd
@@ -48,14 +52,6 @@ void packet_fflush(FILE *f);
 /*
  * Read a packetized line into the buffer, which must be at least size bytes
  * long. The return value specifies the number of bytes read into the buffer.
- *
- * If src_buffer and *src_buffer are not NULL, it should point to a buffer
- * containing the packet data to parse, of at least *src_len bytes.  After the
- * function returns, src_buf will be incremented and src_len decremented by the
- * number of bytes consumed.
- *
- * If src_buffer (or *src_buffer) is NULL, then data is read from the
- * descriptor "fd".
  *
  * If options does not contain PACKET_READ_GENTLE_ON_EOF, we will die under any
  * of the following conditions:
@@ -88,6 +84,7 @@ void packet_fflush(FILE *f);
 #define PACKET_READ_DIE_ON_ERR_PACKET    (1u<<2)
 #define PACKET_READ_GENTLE_ON_READ_ERROR (1u<<3)
 #define PACKET_READ_REDACT_URI_PATH      (1u<<4)
+#define PACKET_READ_USE_SIDEBAND         (1u<<5)
 int packet_read(int fd, char *buffer, unsigned size, int options);
 
 /*
@@ -97,13 +94,21 @@ int packet_read(int fd, char *buffer, unsigned size, int options);
  * If lenbuf_hex contains non-hex characters, return -1. Otherwise, return the
  * numeric value of the length header.
  */
-int packet_length(const char lenbuf_hex[4]);
+int packet_length(const char lenbuf_hex[4], size_t size);
 
 /*
  * Read a packetized line into a buffer like the 'packet_read()' function but
  * returns an 'enum packet_read_status' which indicates the status of the read.
  * The number of bytes read will be assigned to *pktlen if the status of the
  * read was 'PACKET_READ_NORMAL'.
+ *
+ * If src_buffer and *src_buffer are not NULL, it should point to a buffer
+ * containing the packet data to parse, of at least *src_len bytes.  After the
+ * function returns, src_buf will be incremented and src_len decremented by the
+ * number of bytes consumed.
+ *
+ * If src_buffer (or *src_buffer) is NULL, then data is read from the
+ * descriptor "fd".
  */
 enum packet_read_status {
 	PACKET_READ_EOF,
@@ -179,7 +184,7 @@ struct packet_reader {
 	int pktlen;
 
 	/* the last line read */
-	const char *line;
+	char *line;
 
 	/* indicates if a line has been peeked */
 	int line_peeked;
@@ -189,6 +194,9 @@ struct packet_reader {
 
 	/* hash algorithm in use */
 	const struct git_hash_algo *hash_algo;
+
+	/* hold temporary sideband message */
+	struct strbuf scratch;
 };
 
 /*
@@ -240,5 +248,7 @@ __attribute__((format (printf, 2, 3)))
 void packet_writer_error(struct packet_writer *writer, const char *fmt, ...);
 void packet_writer_delim(struct packet_writer *writer);
 void packet_writer_flush(struct packet_writer *writer);
+
+void packet_trace_identity(const char *prog);
 
 #endif

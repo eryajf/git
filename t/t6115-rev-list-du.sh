@@ -1,6 +1,7 @@
 #!/bin/sh
 
 test_description='basic tests of rev-list --disk-usage'
+
 . ./test-lib.sh
 
 # we want a mix of reachable and unreachable, as well as
@@ -21,7 +22,7 @@ test_expect_success 'set up repository' '
 disk_usage_slow () {
 	git rev-list --no-object-names "$@" |
 	git cat-file --batch-check="%(objectsize:disk)" |
-	perl -lne '$total += $_; END { print $total}'
+	awk '{ i += $1 } END { print i }'
 }
 
 # check behavior with given rev-list options; note that
@@ -47,5 +48,34 @@ check_du () {
 check_du HEAD
 check_du --objects HEAD
 check_du --objects HEAD^..HEAD
+
+test_expect_success 'setup for --unpacked tests' '
+	git repack -adb &&
+	test_commit unpacked
+'
+
+check_du --all --objects --unpacked
+
+# As mentioned above, don't use hardcode sizes as actual size, but use the
+# output from git cat-file.
+test_expect_success 'rev-list --disk-usage=human' '
+	git rev-list --objects HEAD --disk-usage=human >actual &&
+	disk_usage_slow --objects HEAD >actual_size &&
+	test_grep "$(cat actual_size) bytes" actual
+'
+
+test_expect_success 'rev-list --disk-usage=human with bitmaps' '
+	git rev-list --objects HEAD --use-bitmap-index --disk-usage=human >actual &&
+	disk_usage_slow --objects HEAD >actual_size &&
+	test_grep "$(cat actual_size) bytes" actual
+'
+
+test_expect_success 'rev-list use --disk-usage unproperly' '
+	test_must_fail git rev-list --objects HEAD --disk-usage=typo 2>err &&
+	cat >expect <<-\EOF &&
+	fatal: invalid value for '\''--disk-usage=<format>'\'': '\''typo'\'', the only allowed format is '\''human'\''
+	EOF
+	test_cmp err expect
+'
 
 test_done

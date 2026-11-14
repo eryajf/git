@@ -9,8 +9,12 @@ This test verifies the basic operation of the add, merge, split, pull,
 and push subcommands of git subtree.
 '
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 TEST_DIRECTORY=$(pwd)/../../../t
 . "$TEST_DIRECTORY"/test-lib.sh
+. "$TEST_DIRECTORY"/lib-gpg.sh
 
 # Use our own wrapper around test-lib.sh's test_create_repo, in order
 # to set log.date=relative.  `git subtree` parses the output of `git
@@ -43,11 +47,62 @@ last_commit_subject () {
 	git log --pretty=format:%s -1
 }
 
+# Upon 'git subtree add|merge --squash' of an annotated tag,
+# pre-2.32.0 versions of 'git subtree' would write the hash of the tag
+# (sub1 below), instead of the commit (sub1^{commit}) in the
+# "git-subtree-split" trailer.
+# We imitate this behaviour below using a replace ref.
+# This function creates 3 repositories:
+# - $1
+# - $1-sub (added as subtree "sub" in $1)
+# - $1-clone (clone of $1)
+test_create_pre2_32_repo () {
+	subtree_test_create_repo "$1" &&
+	subtree_test_create_repo "$1-sub" &&
+	test_commit -C "$1" main1 &&
+	test_commit -C "$1-sub" --annotate sub1 &&
+	git -C "$1" subtree add --prefix="sub" --squash "../$1-sub" sub1 &&
+	tag=$(git -C "$1" rev-parse FETCH_HEAD) &&
+	commit=$(git -C "$1" rev-parse FETCH_HEAD^{commit}) &&
+	git -C "$1" log -1 --format=%B HEAD^2 >msg &&
+	test_commit -C "$1-sub" --annotate sub2 &&
+	git clone --no-local "$1" "$1-clone" &&
+	new_commit=$(sed -e "s/$commit/$tag/" msg | git -C "$1-clone" commit-tree HEAD^2^{tree}) &&
+	git -C "$1-clone" replace HEAD^2 $new_commit
+}
+
+# test_create_subtree_add REPO ORPHAN PREFIX FILENAME ...
+#
+# Create a simple subtree on a new branch named ORPHAN in REPO.
+# The subtree is then merged into the current branch of REPO,
+# under PREFIX. The generated subtree has one commit
+# with subject and tag FILENAME with a single file "FILENAME.t"
+#
+# When this method returns:
+# - the current branch of REPO will have file PREFIX/FILENAME.t
+# - REPO will have a branch named ORPHAN with subtree history
+#
+# additional arguments are forwarded to "subtree add"
+test_create_subtree_add () {
+	(
+		cd "$1" &&
+		orphan="$2" &&
+		prefix="$3" &&
+		filename="$4" &&
+		shift 4 &&
+		last="$(git branch --show-current)" &&
+		git switch --orphan "$orphan" &&
+		test_commit "$filename" &&
+		git checkout "$last" &&
+		git subtree add --prefix="$prefix" "$@" "$orphan"
+	)
+}
+
 test_expect_success 'shows short help text for -h' '
-	test_expect_code 129 git subtree -h >out 2>err &&
+	git subtree -h >out 2>err &&
 	test_must_be_empty err &&
 	grep -e "^ *or: git subtree pull" out &&
-	grep -e --annotate out
+	grep -F -e "--[no-]annotate" out
 '
 
 #
@@ -264,6 +319,13 @@ test_expect_success 'merge new subproj history into subdir/ with a slash appende
 	)
 '
 
+test_expect_success 'merge with --squash after annotated tag was added/merged with --squash pre-v2.32.0 ' '
+	test_create_pre2_32_repo "$test_count" &&
+	git -C "$test_count-clone" fetch "../$test_count-sub" sub2  &&
+	test_must_fail git -C "$test_count-clone" subtree merge --prefix="sub" --squash FETCH_HEAD &&
+	git -C "$test_count-clone" subtree merge --prefix="sub" --squash FETCH_HEAD  "../$test_count-sub"
+'
+
 #
 # Tests for 'git subtree split'
 #
@@ -277,7 +339,7 @@ test_expect_success 'split requires option --prefix' '
 		cd "$test_count" &&
 		git fetch ./"sub proj" HEAD &&
 		git subtree add --prefix="sub dir" FETCH_HEAD &&
-		echo "You must provide the --prefix option." >expected &&
+		echo "fatal: you must provide the --prefix option." >expected &&
 		test_must_fail git subtree split >actual 2>&1 &&
 		test_debug "printf '"expected: "'" &&
 		test_debug "cat expected" &&
@@ -296,13 +358,35 @@ test_expect_success 'split requires path given by option --prefix must exist' '
 		cd "$test_count" &&
 		git fetch ./"sub proj" HEAD &&
 		git subtree add --prefix="sub dir" FETCH_HEAD &&
-		echo "'\''non-existent-directory'\'' does not exist; use '\''git subtree add'\''" >expected &&
+		echo "fatal: '\''non-existent-directory'\'' does not exist; use '\''git subtree add'\''" >expected &&
 		test_must_fail git subtree split --prefix=non-existent-directory >actual 2>&1 &&
 		test_debug "printf '"expected: "'" &&
 		test_debug "cat expected" &&
 		test_debug "printf '"actual: "'" &&
 		test_debug "cat actual" &&
 		test_cmp expected actual
+	)
+'
+
+test_expect_success 'split works when prefix exists in commit but not in working tree' '
+	subtree_test_create_repo "$test_count" &&
+	(
+		cd "$test_count" &&
+
+		# create subtree
+		mkdir pkg &&
+		echo ok >pkg/file &&
+		git add pkg &&
+		git commit -m "add pkg" &&
+		good=$(git rev-parse HEAD) &&
+
+		# remove it from working tree in later commit
+		git rm -r pkg &&
+		git commit -m "remove pkg" &&
+
+		# must still be able to split using the old commit
+		git subtree split --prefix=pkg "$good" >out &&
+		test -s out
 	)
 '
 
@@ -349,8 +433,159 @@ test_expect_success 'split sub dir/ with --rejoin' '
 		git fetch ./"sub proj" HEAD &&
 		git subtree merge --prefix="sub dir" FETCH_HEAD &&
 		split_hash=$(git subtree split --prefix="sub dir" --annotate="*") &&
-		git subtree split --prefix="sub dir" --annotate="*" --rejoin &&
-		test "$(last_commit_subject)" = "Split '\''sub dir/'\'' into commit '\''$split_hash'\''"
+		git subtree split --prefix="sub dir" --annotate="*" -b spl --rejoin &&
+		test "$(last_commit_subject)" = "Split '\''sub dir/'\'' into commit '\''$split_hash'\''" &&
+		test "$(git rev-list --count spl)" -eq 5
+	)
+'
+
+# Tests that commits from other subtrees are not processed as
+# part of a split.
+#
+# This test performs the following:
+# - Creates Repo with subtrees 'subA' and 'subB'
+# - Creates commits in the repo including changes to subtrees
+# - Runs the following 'split' and commit' commands in order:
+# 	- Perform 'split' on subtree A
+# 	- Perform 'split' on subtree B
+# 	- Create new commits with changes to subtree A and B
+# 	- Perform split on subtree A
+# 	- Check for expected history
+test_expect_success 'split with multiple subtrees' '
+	subtree_test_create_repo "$test_count" &&
+	subtree_test_create_repo "$test_count/subA" &&
+	subtree_test_create_repo "$test_count/subB" &&
+	test_create_commit "$test_count" main1 &&
+	test_create_commit "$test_count/subA" subA1 &&
+	test_create_commit "$test_count/subA" subA2 &&
+	test_create_commit "$test_count/subA" subA3 &&
+	test_create_commit "$test_count/subB" subB1 &&
+	git -C "$test_count" fetch ./subA HEAD &&
+	git -C "$test_count" subtree add --prefix=subADir FETCH_HEAD &&
+	git -C "$test_count" fetch ./subB HEAD &&
+	git -C "$test_count" subtree add --prefix=subBDir FETCH_HEAD &&
+	test "$(git -C "$test_count" rev-list --count main)" -eq 7 &&
+	test_create_commit "$test_count" subADir/main-subA1 &&
+	test_create_commit "$test_count" subBDir/main-subB1 &&
+	git -C "$test_count" subtree split --prefix=subADir \
+		--squash --rejoin -m "Sub A Split 1" -b a1 &&
+	test "$(git -C "$test_count" rev-list --count main..a1)" -eq 1 &&
+	git -C "$test_count" subtree split --prefix=subBDir \
+		--squash --rejoin -m "Sub B Split 1" -b b1 &&
+	test "$(git -C "$test_count" rev-list --count main..b1)" -eq 1 &&
+	test_create_commit "$test_count" subADir/main-subA2 &&
+	test_create_commit "$test_count" subBDir/main-subB2 &&
+	git -C "$test_count" subtree split --prefix=subADir \
+		--squash --rejoin -m "Sub A Split 2" -b a2 &&
+	test "$(git -C "$test_count" rev-list --count main..a2)" -eq 2 &&
+	test "$(git -C "$test_count" rev-list --count a1..a2)" -eq 1 &&
+	git -C "$test_count" subtree split --prefix=subBDir \
+		--squash --rejoin -d -m "Sub B Split 1" -b b2 &&
+	test "$(git -C "$test_count" rev-list --count main..b2)" -eq 2 &&
+	test "$(git -C "$test_count" rev-list --count b1..b2)" -eq 1
+'
+
+# When subtree split-ing a directory that has other subtree
+# *merges* underneath it, the split must include those subtrees.
+# This test creates a nested subtree, `subA/subB`, and tests
+# that the tree is correct after a subtree split of `subA/`.
+# The test covers:
+# - An initial `subtree add`; and
+# - A follow-up `subtree merge`
+# both with and without `--squashed`.
+for is_squashed in '' 'y'
+do
+	test_expect_success "split keeps nested ${is_squashed:+--squash }subtrees that are part of the split" '
+		subtree_test_create_repo "$test_count" &&
+		(
+			cd "$test_count" &&
+			mkdir subA &&
+			test_commit subA/file1 &&
+			test_create_subtree_add \
+				. mksubtree subA/subB file2 ${is_squashed:+--squash} &&
+			test_path_is_file subA/file1.t &&
+			test_path_is_file subA/subB/file2.t &&
+			git subtree split --prefix=subA --branch=bsplit &&
+			test "$(git rev-list --count bsplit)" -eq 2 &&
+			git checkout bsplit &&
+			test_path_is_file file1.t &&
+			test_path_is_file subB/file2.t &&
+			git checkout mksubtree &&
+			git branch -D bsplit &&
+			test_commit file3 &&
+			git checkout main &&
+			git subtree merge \
+				${is_squashed:+--squash} \
+				--prefix=subA/subB mksubtree &&
+			test_path_is_file subA/subB/file3.t &&
+			git subtree split --prefix=subA --branch=bsplit &&
+			test "$(git rev-list --count bsplit)" -eq 3 &&
+			git checkout bsplit &&
+			test_path_is_file file1.t &&
+			test_path_is_file subB/file2.t &&
+			test_path_is_file subB/file3.t
+		)
+	'
+done
+
+# Usually,
+#
+#    git subtree merge -P subA --squash f00...
+#
+# makes two commits, in this order:
+#
+# 1. Squashed 'subA/' content from commit f00...
+# 2. Merge commit (1) as 'subA'
+#
+# Commit 1 updates the subtree but does *not* rewrite paths.
+# Commit 2 rewrites all trees to start with `subA/`
+#
+# Commit 1 either has no parents or depends only on other
+# "Squashed 'subA/' content" commits.
+#
+# For merge without --squash, subtree produces just one commit:
+# a merge commit with git-subtree trailers.
+#
+# In either case, if the user rebases these commits, they will
+# still have the git-subtree-* trailers… but will NOT have
+# the layout described above.
+#
+# Test that subsequent `git subtree split` are not confused by this.
+test_expect_success 'split with rebased subtree commit' '
+	subtree_test_create_repo "$test_count" &&
+	(
+		cd "$test_count" &&
+		test_commit file0 &&
+		test_create_subtree_add \
+			. mksubtree subA file1 --squash &&
+		test_path_is_file subA/file1.t &&
+		mkdir subB &&
+		test_commit subB/bfile &&
+		git commit --amend -F - <<'EOF' &&
+Squashed '\''subB/'\'' content from commit '\''badf00da911bbe895347b4b236f5461d55dc9877'\''
+
+Simulate a cherry-picked or rebased subtree commit.
+
+git-subtree-dir: subB
+git-subtree-split: badf00da911bbe895347b4b236f5461d55dc9877
+EOF
+		test_commit subA/file2 &&
+		test_commit subB/bfile2 &&
+		git commit --amend -F - <<'EOF' &&
+Split '\''subB/'\'' into commit '\''badf00da911bbe895347b4b236f5461d55dc9877'\''
+
+Simulate a cherry-picked or rebased subtree commit.
+
+git-subtree-dir: subB
+git-subtree-mainline: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+git-subtree-split: badf00da911bbe895347b4b236f5461d55dc9877
+EOF
+		git subtree split --prefix=subA --branch=bsplit &&
+		git checkout bsplit &&
+		test_path_is_file file1.t &&
+		test_path_is_file file2.t &&
+		test "$(last_commit_subject)" = "subA/file2" &&
+		test "$(git rev-list --count bsplit)" -eq 2
 	)
 '
 
@@ -551,6 +786,12 @@ test_expect_success 'split "sub dir"/ with --branch for an incompatible branch' 
 	)
 '
 
+test_expect_success 'split after annotated tag was added/merged with --squash pre-v2.32.0' '
+	test_create_pre2_32_repo "$test_count" &&
+	test_must_fail git -C "$test_count-clone" subtree split --prefix="sub" HEAD &&
+	git -C "$test_count-clone" subtree split --prefix="sub" HEAD "../$test_count-sub"
+'
+
 #
 # Tests for 'git subtree pull'
 #
@@ -570,7 +811,7 @@ test_expect_success 'pull requires option --prefix' '
 		cd "$test_count" &&
 		test_must_fail git subtree pull ./"sub proj" HEAD >out 2>err &&
 
-		echo "You must provide the --prefix option." >expected &&
+		echo "fatal: you must provide the --prefix option." >expected &&
 		test_must_be_empty out &&
 		test_cmp expected err
 	)
@@ -584,7 +825,7 @@ test_expect_success 'pull requires path given by option --prefix must exist' '
 	(
 		test_must_fail git subtree pull --prefix="sub dir" ./"sub proj" HEAD >out 2>err &&
 
-		echo "'\''sub dir'\'' does not exist; use '\''git subtree add'\''" >expected &&
+		echo "fatal: '\''sub dir'\'' does not exist; use '\''git subtree add'\''" >expected &&
 		test_must_be_empty out &&
 		test_cmp expected err
 	)
@@ -630,6 +871,11 @@ test_expect_success 'pull rejects flags for split' '
 	)
 '
 
+test_expect_success 'pull with --squash after annotated tag was added/merged with --squash pre-v2.32.0 ' '
+	test_create_pre2_32_repo "$test_count" &&
+	git -C "$test_count-clone" subtree -d pull --prefix="sub" --squash "../$test_count-sub" sub2
+'
+
 #
 # Tests for 'git subtree push'
 #
@@ -643,7 +889,7 @@ test_expect_success 'push requires option --prefix' '
 		cd "$test_count" &&
 		git fetch ./"sub proj" HEAD &&
 		git subtree add --prefix="sub dir" FETCH_HEAD &&
-		echo "You must provide the --prefix option." >expected &&
+		echo "fatal: you must provide the --prefix option." >expected &&
 		test_must_fail git subtree push "./sub proj" from-mainline >actual 2>&1 &&
 		test_debug "printf '"expected: "'" &&
 		test_debug "cat expected" &&
@@ -662,7 +908,7 @@ test_expect_success 'push requires path given by option --prefix must exist' '
 		cd "$test_count" &&
 		git fetch ./"sub proj" HEAD &&
 		git subtree add --prefix="sub dir" FETCH_HEAD &&
-		echo "'\''non-existent-directory'\'' does not exist; use '\''git subtree add'\''" >expected &&
+		echo "fatal: '\''non-existent-directory'\'' does not exist; use '\''git subtree add'\''" >expected &&
 		test_must_fail git subtree push --prefix=non-existent-directory "./sub proj" from-mainline >actual 2>&1 &&
 		test_debug "printf '"expected: "'" &&
 		test_debug "cat expected" &&
@@ -951,6 +1197,12 @@ test_expect_success 'push "sub dir"/ with a local rev' '
 		split_tree=$(git -C "sub proj" rev-parse --verify refs/heads/from-mainline:) &&
 		test "$split_tree" = "$good_tree"
 	)
+'
+
+test_expect_success 'push after annotated tag was added/merged with --squash pre-v2.32.0' '
+	test_create_pre2_32_repo "$test_count" &&
+	test_create_commit "$test_count-clone" sub/main-sub1 &&
+	git -C "$test_count-clone" subtree push --prefix="sub" "../$test_count-sub" from-mainline
 '
 
 #
@@ -1415,6 +1667,116 @@ test_expect_success 'push split to subproj' '
 	)
 '
 
+# --ignore-joins must ignore mainline content outside of the
+# subtree. This test verifies that the logic in
+# `find_existing_splits()` correctly handles a `git subtree add`
+# In this test, the split history must not contain a commit titled
+#
+#     Add 'sub/' from commit ...
+#
+# see: dd21d43b58 (subtree: make --ignore-joins pay
+#      attention to adds, 2018-09-28)
+test_expect_success 'split --ignore-joins respects subtree add' '
+	subtree_test_create_repo "$test_count" &&
+	(
+		cd "$test_count" &&
+		test_commit main_must_not_be_in_subtree &&
+		test_create_subtree_add . mksubtree sub sub1 &&
+		test_commit sub/sub2 &&
+		test_commit main_must_not_be_in_subtree2 &&
+		git subtree split --prefix sub -b first_split --rejoin &&
+		test_commit sub/sub3 &&
+		no_ignore_joins="$(git subtree split --prefix sub -b no_ignore_joins)" &&
+		ignore_joins="$(git subtree split --prefix sub --ignore-joins -b ignore_joins)" &&
+		git checkout ignore_joins &&
+		test_path_is_file sub1.t &&
+		test_path_is_file sub2.t &&
+		test_path_is_file sub3.t &&
+		! test_path_is_file main_must_not_be_in_subtree.t &&
+		! test_path_is_file main_must_not_be_in_subtree2.t &&
+		test -z "$(git log -1 --grep "Add '''sub/''' from commit" ignore_joins)" &&
+		test "$no_ignore_joins" = "$ignore_joins" &&
+		test "$(git rev-list --count ignore_joins)" -eq 3;
+	)
+'
+
+# split excludes commits reachable from any previous --rejoin.
+# These ignored commits can still be the basis for new work
+# after the --rejoin. These commits must be processed, even
+# if they are excluded. Otherwise, the split history will be
+# incorrect.
+#
+# here, the merge
+#
+#     git merge --no-ff new_work_based_on_prejoin
+#
+# doesn't contain any subtree changes and so should not end
+# up in the split history. this subtree should be flat,
+# with no merges.
+#
+# see: 315a84f9aa (subtree: use commits before rejoins for
+#      splits, 2018-09-28)
+test_expect_success 'split links out-of-tree pre --rejoin commits with post --rejoin commits' '
+	subtree_test_create_repo "$test_count" &&
+	(
+		cd "$test_count" &&
+		test_commit main_must_not_be_in_subtree &&
+		mkdir sub &&
+		test_commit sub/sub1 &&
+		test_commit sub/sub2 &&
+		git subtree split --prefix sub --rejoin &&
+		test "$(git rev-list --count HEAD)" -eq 6 &&
+		git checkout sub/sub1 &&
+		git checkout -b new_work_based_on_prejoin &&
+		test_commit main_must_not_be_in_subtree2 &&
+		git checkout main &&
+		git merge --no-ff new_work_based_on_prejoin &&
+		test_commit sub/sub3 &&
+		git subtree split -d --prefix sub -b second_split &&
+		git checkout second_split &&
+		test_path_is_file sub1.t &&
+		test_path_is_file sub2.t &&
+		test_path_is_file sub3.t &&
+		! test_path_is_file main_must_not_be_in_subtree.t &&
+		! test_path_is_file main_must_not_be_in_subtree2.t &&
+		test "$(git rev-list --count --merges second_split)" -eq 0 &&
+		test "$(git rev-list --count second_split)" -eq 3;
+	)
+'
+
+# split must keep merge commits with unrelated histories, even
+# if both parents are treesame. When deciding whether or not
+# to eliminate a parent, copy_or_skip compares the merge-base
+# of each parent.
+#
+# in the split_of_merges branch:
+#
+#   * expect 4 commits
+#   * HEAD~ must be a merge
+#
+# see: 68f8ff8151 (subtree: improve decision on merges kept
+#      in split, 2018-09-28)
+test_expect_success 'split preserves merges with unrelated history' '
+	subtree_test_create_repo "$test_count" &&
+	(
+		cd "$test_count" &&
+		test_commit main_must_not_be_in_subtree &&
+		mkdir sub &&
+		test_commit sub/sub1 &&
+		git checkout --orphan new_history &&
+		git checkout sub/sub1 -- . &&
+		git add . &&
+		git commit -m "treesame history but not a merge-base" &&
+		git checkout main &&
+		git merge --allow-unrelated-histories --no-ff new_history &&
+		test "$(git rev-parse "HEAD^1^{tree}")" = "$(git rev-parse "HEAD^2^{tree}")" &&
+		test_commit sub/sub2 &&
+		git subtree split -d --prefix sub -b split_of_merges &&
+		test "$(git rev-list --count split_of_merges)" -eq 4 &&
+		test -n "$(git rev-list --merges HEAD~)";
+	)
+'
+
 #
 # This test covers 2 cases in subtree split copy_or_skip code
 # 1) Merges where one parent is a superset of the changes of the other
@@ -1437,7 +1799,6 @@ test_expect_success 'push split to subproj' '
 
 test_expect_success 'subtree descendant check' '
 	subtree_test_create_repo "$test_count" &&
-	defaultBranch=$(sed "s,ref: refs/heads/,," "$test_count/.git/HEAD") &&
 	test_create_commit "$test_count" folder_subtree/a &&
 	(
 		cd "$test_count" &&
@@ -1454,7 +1815,7 @@ test_expect_success 'subtree descendant check' '
 	(
 		cd "$test_count" &&
 		git cherry-pick $cherry &&
-		git checkout $defaultBranch &&
+		git checkout main &&
 		git merge -m "merge should be kept on subtree" branch &&
 		git branch no_subtree_work_branch
 	) &&
@@ -1466,12 +1827,124 @@ test_expect_success 'subtree descendant check' '
 	test_create_commit "$test_count" not_a_subtree_change &&
 	(
 		cd "$test_count" &&
-		git checkout $defaultBranch &&
+		git checkout main &&
 		git merge -m "merge should be skipped on subtree" no_subtree_work_branch &&
 
-		git subtree split --prefix folder_subtree/ --branch subtree_tip $defaultBranch &&
+		git subtree split --prefix folder_subtree/ --branch subtree_tip main &&
 		git subtree split --prefix folder_subtree/ --branch subtree_branch branch &&
 		test $(git rev-list --count subtree_tip..subtree_branch) = 0
+	)
+'
+
+test_expect_success GPG 'add subproj with GPG signing using -S flag' '
+	subtree_test_create_repo "$test_count" &&
+	subtree_test_create_repo "$test_count/sub proj" &&
+	test_create_commit "$test_count" main1 &&
+	test_create_commit "$test_count/sub proj" sub1 &&
+	(
+		cd "$test_count" &&
+		git fetch ./"sub proj" HEAD &&
+		git subtree add --prefix="sub dir" -S FETCH_HEAD &&
+		git verify-commit HEAD &&
+		test "$(last_commit_subject)" = "Add '\''sub dir/'\'' from commit '\''$(git rev-parse FETCH_HEAD)'\''"
+	)
+'
+
+test_expect_success GPG 'add subproj with GPG signing using --gpg-sign flag' '
+	subtree_test_create_repo "$test_count" &&
+	subtree_test_create_repo "$test_count/sub proj" &&
+	test_create_commit "$test_count" main1 &&
+	test_create_commit "$test_count/sub proj" sub1 &&
+	(
+		cd "$test_count" &&
+		git fetch ./"sub proj" HEAD &&
+		git subtree add --prefix="sub dir" --gpg-sign FETCH_HEAD &&
+		git verify-commit HEAD &&
+		test "$(last_commit_subject)" = "Add '\''sub dir/'\'' from commit '\''$(git rev-parse FETCH_HEAD)'\''"
+	)
+'
+
+test_expect_success GPG 'add subproj with GPG signing using specific key ID' '
+	subtree_test_create_repo "$test_count" &&
+	subtree_test_create_repo "$test_count/sub proj" &&
+	test_create_commit "$test_count" main1 &&
+	test_create_commit "$test_count/sub proj" sub1 &&
+	(
+		cd "$test_count" &&
+		git fetch ./"sub proj" HEAD &&
+		git subtree add --prefix="sub dir" -S"$GIT_COMMITTER_EMAIL" FETCH_HEAD &&
+		git verify-commit HEAD &&
+		test "$(last_commit_subject)" = "Add '\''sub dir/'\'' from commit '\''$(git rev-parse FETCH_HEAD)'\''"
+	)
+'
+
+test_expect_success GPG 'merge with GPG signing' '
+	subtree_test_create_repo "$test_count" &&
+	subtree_test_create_repo "$test_count/sub proj" &&
+	test_create_commit "$test_count" main1 &&
+	test_create_commit "$test_count/sub proj" sub1 &&
+	(
+		cd "$test_count" &&
+		git fetch ./"sub proj" HEAD &&
+		git subtree add --prefix="sub dir" FETCH_HEAD
+	) &&
+	test_create_commit "$test_count/sub proj" sub2 &&
+	(
+		cd "$test_count" &&
+		git fetch ./"sub proj" HEAD &&
+		git subtree merge --prefix="sub dir" -S FETCH_HEAD &&
+		git verify-commit HEAD
+	)
+'
+
+test_expect_success GPG 'split with GPG signing and --rejoin' '
+	subtree_test_create_repo "$test_count" &&
+	subtree_test_create_repo "$test_count/sub proj" &&
+	test_create_commit "$test_count" main1 &&
+	test_create_commit "$test_count/sub proj" sub1 &&
+	(
+		cd "$test_count" &&
+		git fetch ./"sub proj" HEAD &&
+		git subtree add --prefix="sub dir" FETCH_HEAD
+	) &&
+	test_create_commit "$test_count" "sub dir/main-sub1" &&
+	(
+		cd "$test_count" &&
+		git subtree split --prefix="sub dir" --rejoin -S &&
+		git verify-commit HEAD
+	)
+'
+
+test_expect_success GPG 'add with --squash and GPG signing' '
+	subtree_test_create_repo "$test_count" &&
+	subtree_test_create_repo "$test_count/sub proj" &&
+	test_create_commit "$test_count" main1 &&
+	test_create_commit "$test_count/sub proj" sub1 &&
+	(
+		cd "$test_count" &&
+		git fetch ./"sub proj" HEAD &&
+		git subtree add --prefix="sub dir" --squash -S FETCH_HEAD &&
+		git verify-commit HEAD &&
+		# With --squash, the commit subject should reference the squash commit (first parent of merge)
+		squash_commit=$(git rev-parse HEAD^2) &&
+		test "$(last_commit_subject)" = "Merge commit '\''$squash_commit'\'' as '\''sub dir'\''"
+	)
+'
+
+test_expect_success GPG 'pull with GPG signing' '
+	subtree_test_create_repo "$test_count" &&
+	subtree_test_create_repo "$test_count/sub proj" &&
+	test_create_commit "$test_count" main1 &&
+	test_create_commit "$test_count/sub proj" sub1 &&
+	(
+		cd "$test_count" &&
+		git subtree add --prefix="sub dir" ./"sub proj" HEAD
+	) &&
+	test_create_commit "$test_count/sub proj" sub2 &&
+	(
+		cd "$test_count" &&
+		git subtree pull --prefix="sub dir" -S ./"sub proj" HEAD &&
+		git verify-commit HEAD
 	)
 '
 

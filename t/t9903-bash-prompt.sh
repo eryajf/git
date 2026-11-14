@@ -13,10 +13,10 @@ export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 . "$GIT_BUILD_DIR/contrib/completion/git-prompt.sh"
 
 actual="$TRASH_DIRECTORY/actual"
-c_red='\\[\\e[31m\\]'
-c_green='\\[\\e[32m\\]'
-c_lblue='\\[\\e[1;34m\\]'
-c_clear='\\[\\e[0m\\]'
+c_red='\001\e[31m\002'
+c_green='\001\e[32m\002'
+c_lblue='\001\e[1;34m\002'
+c_clear='\001\e[0m\002'
 
 test_expect_success 'setup for prompt tests' '
 	git init otherrepo &&
@@ -65,10 +65,6 @@ test_expect_success 'prompt - unborn branch' '
 	__git_ps1 >"$actual" &&
 	test_cmp expected "$actual"
 '
-
-if test_have_prereq !FUNNYNAMES; then
-	say 'Your filesystem does not allow newlines in filenames.'
-fi
 
 test_expect_success FUNNYNAMES 'prompt - with newline in path' '
     repo_with_newline="repo
@@ -754,6 +750,22 @@ test_expect_success 'prompt - hide if pwd ignored - inside gitdir' '
 	(
 		GIT_PS1_HIDE_IF_PWD_IGNORED=y &&
 		cd .git &&
+		__git_ps1 >"$actual"
+	) &&
+	test_cmp expected "$actual"
+'
+
+test_expect_success 'prompt - conflict indicator' '
+	printf " (main|CONFLICT)" >expected &&
+	echo "stash" >file &&
+	git stash &&
+	test_when_finished "git stash drop" &&
+	echo "commit" >file &&
+	git commit -m "commit" file &&
+	test_when_finished "git reset --hard HEAD~" &&
+	test_must_fail git stash apply &&
+	(
+		GIT_PS1_SHOWCONFLICTSTATE="yes" &&
 		__git_ps1 >"$actual"
 	) &&
 	test_cmp expected "$actual"

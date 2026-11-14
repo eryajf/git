@@ -2,7 +2,6 @@
 #define FETCH_PACK_H
 
 #include "string-list.h"
-#include "run-command.h"
 #include "protocol.h"
 #include "list-objects-filter-options.h"
 #include "oidset.h"
@@ -20,9 +19,10 @@ struct fetch_pack_args {
 
 	/*
 	 * If not NULL, during packfile negotiation, fetch-pack will send "have"
-	 * lines only with these tips and their ancestors.
+	 * lines for all _include_ tips and then a subset of the _restrict_ tips.
 	 */
-	const struct oid_array *negotiation_tips;
+	const struct oid_array *negotiation_restrict_tips;
+	const struct oid_array *negotiation_include_tips;
 
 	unsigned deepen_relative:1;
 	unsigned quiet:1;
@@ -90,16 +90,33 @@ struct ref *fetch_pack(struct fetch_pack_args *args,
  * In the capability advertisement that has happened prior to invoking this
  * function, the "wait-for-done" capability must be present.
  */
-void negotiate_using_fetch(const struct oid_array *negotiation_tips,
+void negotiate_using_fetch(const struct oid_array *negotiation_restrict_tips,
 			   const struct string_list *server_options,
 			   int stateless_rpc,
 			   int fd[],
-			   struct oidset *acked_commits);
+			   struct oidset *acked_commits,
+			   const struct oid_array *negotiation_include_tips);
 
 /*
  * Print an appropriate error message for each sought ref that wasn't
  * matched.  Return 0 if all sought refs were matched, otherwise 1.
  */
 int report_unmatched_refs(struct ref **sought, int nr_sought);
+
+/*
+ * Return true if checks for broken objects in received pack are required.
+ */
+int fetch_pack_fsck_objects(void);
+
+/*
+ * Check if the provided config variable pertains to fetch fsck and if so append
+ * the configuration to the provided strbuf.
+ *
+ * When a fetch fsck config option is successfully processed the function
+ * returns 0. If the provided config option is unrelated to fetch fsck, 1 is
+ * returned. Errors return -1.
+ */
+int fetch_pack_fsck_config(const char *var, const char *value,
+			   struct strbuf *msg_types);
 
 #endif

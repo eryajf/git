@@ -1,12 +1,20 @@
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
 #include "config.h"
 #include "entry.h"
+#include "gettext.h"
+#include "hash.h"
+#include "hex.h"
 #include "parallel-checkout.h"
 #include "pkt-line.h"
 #include "progress.h"
+#include "read-cache-ll.h"
 #include "run-command.h"
 #include "sigchain.h"
-#include "streaming.h"
+#include "odb/streaming.h"
+#include "symlinks.h"
 #include "thread-utils.h"
 #include "trace2.h"
 
@@ -49,12 +57,12 @@ void get_parallel_checkout_configs(int *num_workers, int *threshold)
 		return;
 	}
 
-	if (git_config_get_int("checkout.workers", num_workers))
+	if (repo_config_get_int(the_repository, "checkout.workers", num_workers))
 		*num_workers = DEFAULT_NUM_WORKERS;
 	else if (*num_workers < 1)
 		*num_workers = online_cpus();
 
-	if (git_config_get_int("checkout.thresholdForParallelism", threshold))
+	if (repo_config_get_int(the_repository, "checkout.thresholdForParallelism", threshold))
 		*threshold = DEFAULT_THRESHOLD_FOR_PARALLELISM;
 }
 
@@ -143,7 +151,8 @@ static int is_eligible_for_parallel_checkout(const struct cache_entry *ce,
 	}
 }
 
-int enqueue_checkout(struct cache_entry *ce, struct conv_attrs *ca)
+int enqueue_checkout(struct cache_entry *ce, struct conv_attrs *ca,
+		     int *checkout_counter)
 {
 	struct parallel_checkout_item *pc_item;
 
@@ -159,6 +168,7 @@ int enqueue_checkout(struct cache_entry *ce, struct conv_attrs *ca)
 	memcpy(&pc_item->ca, ca, sizeof(pc_item->ca));
 	pc_item->status = PC_ITEM_PENDING;
 	pc_item->id = parallel_checkout.nr;
+	pc_item->checkout_counter = checkout_counter;
 	parallel_checkout.nr++;
 
 	return 0;
@@ -200,7 +210,8 @@ static int handle_results(struct checkout *state)
 
 		switch(pc_item->status) {
 		case PC_ITEM_WRITTEN:
-			/* Already handled */
+			if (pc_item->checkout_counter)
+				(*pc_item->checkout_counter)++;
 			break;
 		case PC_ITEM_COLLIDED:
 			/*
@@ -225,7 +236,8 @@ static int handle_results(struct checkout *state)
 			 * add any extra overhead.
 			 */
 			ret |= checkout_entry_ca(pc_item->ce, &pc_item->ca,
-						 state, NULL, NULL);
+						 state, NULL,
+						 pc_item->checkout_counter);
 			advance_progress_meter();
 			break;
 		case PC_ITEM_PENDING:
@@ -265,11 +277,12 @@ static int write_pc_item_to_fd(struct parallel_checkout_item *pc_item, int fd,
 	ssize_t wrote;
 
 	/* Sanity check */
-	assert(is_eligible_for_parallel_checkout(pc_item->ce, &pc_item->ca));
+	ASSERT(is_eligible_for_parallel_checkout(pc_item->ce, &pc_item->ca));
 
 	filter = get_stream_filter_ca(&pc_item->ca, &pc_item->ce->oid);
 	if (filter) {
-		if (stream_blob_to_fd(fd, &pc_item->ce->oid, filter, 1)) {
+		if (odb_stream_blob_to_fd(the_repository->objects, fd,
+					  &pc_item->ce->oid, filter, 1)) {
 			/* On error, reset fd to try writing without streaming */
 			if (reset_fd(fd, path))
 				return -1;
@@ -420,13 +433,7 @@ static void send_one_item(int fd, struct parallel_checkout_item *pc_item)
 	fixed_portion->ident = pc_item->ca.ident;
 	fixed_portion->name_len = name_len;
 	fixed_portion->working_tree_encoding_len = working_tree_encoding_len;
-	/*
-	 * We pad the unused bytes in the hash array because, otherwise,
-	 * Valgrind would complain about passing uninitialized bytes to a
-	 * write() syscall. The warning doesn't represent any real risk here,
-	 * but it could hinder the detection of actual errors.
-	 */
-	oidcpy_with_padding(&fixed_portion->oid, &pc_item->ce->oid);
+	oidcpy(&fixed_portion->oid, &pc_item->ce->oid);
 
 	variant = data + sizeof(*fixed_portion);
 	if (working_tree_encoding_len) {

@@ -74,8 +74,8 @@ test_lazy_prereq UNICODE_NFD_PRESERVED '
 # Yielding:   \xcf \x89  +  \xcc \x94  +  \xcd \x82
 #
 # Note that I've used the canonical ordering of the
-# combinining characters.  It is also possible to
-# swap them.  My testing shows that that non-standard
+# combining characters.  It is also possible to
+# swap them.  My testing shows that non-standard
 # ordering also causes a collision in mkdir.  However,
 # the resulting names don't draw correctly on the
 # terminal (implying that the on-disk format also has

@@ -37,6 +37,27 @@ Alongc=$Alongc$Alongc$Alongc$Alongc$Alongc           #50 Byte
 Alongc=$Alongc$Alongc$Alongc$Alongc$Alongc           #250 Byte
 Alongc=$Alongc$AEligatu$AEligatu                     #254 Byte
 
+
+ls_files_nfc_nfd () {
+	test_when_finished "git config --global --unset core.precomposeunicode" &&
+	prglbl=$1
+	prlocl=$2
+	aumlcreat=$3
+	aumllist=$4
+	git config --global core.precomposeunicode $prglbl &&
+	(
+		rm -rf .git &&
+		mkdir -p "somewhere/$prglbl/$prlocl/$aumlcreat" &&
+		mypwd=$PWD &&
+		cd "somewhere/$prglbl/$prlocl/$aumlcreat" &&
+		git init &&
+		git config core.precomposeunicode $prlocl &&
+		git --literal-pathspecs ls-files "$mypwd/somewhere/$prglbl/$prlocl/$aumllist" 2>err &&
+		>expected &&
+		test_cmp expected err
+	)
+}
+
 test_expect_success "detect if nfd needed" '
 	precomposeunicode=$(git config core.precomposeunicode) &&
 	test "$precomposeunicode" = true &&
@@ -186,6 +207,22 @@ test_expect_success "Add long precomposed filename" '
 	git commit -m "Long filename"
 '
 
+test_expect_success "status with long non-ASCII filename" '
+	test_when_finished "rm -rf long-utf8-status" &&
+	git init long-utf8-status &&
+	(
+		cd long-utf8-status &&
+		test "$(git config --bool core.precomposeunicode)" = true &&
+		long_utf8_name=$(
+			printf "%253s\342\200\224" "" |
+			tr " " a
+		) &&
+		test "$(printf "%s" "$long_utf8_name" | wc -c | tr -d " ")" = 256 &&
+		printf "content\n" >"$long_utf8_name" &&
+		git status --porcelain=v1 >actual
+	)
+'
+
 test_expect_failure 'handle existing decomposed filenames' '
 	echo content >"verbatim.$Adiarnfd" &&
 	git -c core.precomposeunicode=false add "verbatim.$Adiarnfd" &&
@@ -211,13 +248,29 @@ test_expect_success "unicode decomposed: git restore -p . " '
 '
 
 # Test if the global core.precomposeunicode stops autosensing
-# Must be the last test case
 test_expect_success "respect git config --global core.precomposeunicode" '
+	test_when_finished "git config --global --unset core.precomposeunicode" &&
 	git config --global core.precomposeunicode true &&
 	rm -rf .git &&
 	git init &&
 	precomposeunicode=$(git config core.precomposeunicode) &&
 	test "$precomposeunicode" = "true"
+'
+
+test_expect_success "ls-files false false nfd nfd" '
+	ls_files_nfc_nfd false false $Adiarnfd $Adiarnfd
+'
+
+test_expect_success "ls-files false true nfd nfd" '
+	ls_files_nfc_nfd false true $Adiarnfd $Adiarnfd
+'
+
+test_expect_success "ls-files true false nfd nfd" '
+	ls_files_nfc_nfd true false $Adiarnfd $Adiarnfd
+'
+
+test_expect_success "ls-files true true nfd nfd" '
+	ls_files_nfc_nfd true true $Adiarnfd $Adiarnfd
 '
 
 test_done

@@ -2,7 +2,6 @@
 
 test_description='check that certain rev-parse options work outside repo'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'set up non-repo directory' '
@@ -33,7 +32,7 @@ test_expect_success 'rev-parse --local-env-vars' '
 	git rev-parse --local-env-vars >actual &&
 	# we do not want to depend on the complete list here,
 	# so just look for something plausible
-	grep ^GIT_DIR actual
+	test_grep ^GIT_DIR actual
 '
 
 test_expect_success 'rev-parse --resolve-git-dir' '

@@ -71,12 +71,58 @@ test_expect_success 'check-mailmap --stdin arguments: mapping' '
 	test_cmp expect actual
 '
 
-test_expect_success 'check-mailmap bogus contact' '
-	test_must_fail git check-mailmap bogus
+test_expect_success 'check-mailmap simple address: mapping' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-EOF &&
+	New Name <$GIT_AUTHOR_EMAIL>
+	EOF
+	cat .mailmap >expect &&
+	git check-mailmap "$GIT_AUTHOR_EMAIL" >actual &&
+	test_cmp expect actual
 '
 
-test_expect_success 'check-mailmap bogus contact --stdin' '
-	test_must_fail git check-mailmap --stdin bogus </dev/null
+test_expect_success 'check-mailmap --stdin simple address: mapping' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-EOF &&
+	New Name <$GIT_AUTHOR_EMAIL>
+	EOF
+	cat >stdin <<-EOF &&
+	$GIT_AUTHOR_EMAIL
+	EOF
+	cat .mailmap >expect &&
+	git check-mailmap --stdin <stdin >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'check-mailmap simple address: no mapping' '
+	cat >expect <<-EOF &&
+	<bugs@company.xx>
+	EOF
+	git check-mailmap "bugs@company.xx" >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'check-mailmap --stdin simple address: no mapping' '
+	cat >expect <<-EOF &&
+	<bugs@company.xx>
+	EOF
+	cat >stdin <<-EOF &&
+	bugs@company.xx
+	EOF
+	git check-mailmap --stdin <stdin >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'check-mailmap name and address: mapping' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-EOF &&
+	Bug Reports <bugs-new@company.xx> Bugs <bugs@company.xx>
+	EOF
+	cat >expect <<-EOF &&
+	<bugs@company.xx>
+	EOF
+	git check-mailmap "bugs@company.xx" >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'No mailmap' '
@@ -134,7 +180,7 @@ test_expect_success 'mailmap.file set' '
 	git shortlog HEAD >actual &&
 	test_cmp expect actual &&
 
-	# The internal_mailmap/.mailmap file is an a subdirectory, but
+	# The internal_mailmap/.mailmap file is in a subdirectory, but
 	# as shown here it can also be outside the repository
 	test_when_finished "rm -rf sub-repo" &&
 	git clone . sub-repo &&
@@ -360,7 +406,7 @@ test_expect_success 'mailmap.blob might be the wrong type' '
 	cp default.map .mailmap &&
 
 	git -c mailmap.blob=HEAD: shortlog HEAD >actual 2>err &&
-	test_i18ngrep "mailmap is not a blob" err &&
+	test_grep "mailmap is not a blob" err &&
 	test_cmp expect actual
 '
 
@@ -466,7 +512,7 @@ test_expect_success 'gitmailmap(5) example output: example #1' '
 	Author Jane Doe <jane@laptop.(none)> maps to Jane Doe <jane@laptop.(none)>
 	Committer C O Mitter <committer@example.com> maps to C O Mitter <committer@example.com>
 
-	Author Jane D <jane@desktop.(none)> maps to Jane Doe <jane@desktop.(none)>
+	Author Jane D. <jane@desktop.(none)> maps to Jane Doe <jane@desktop.(none)>
 	Committer C O Mitter <committer@example.com> maps to C O Mitter <committer@example.com>
 	EOF
 	git -C doc log --reverse --pretty=format:"Author %an <%ae> maps to %aN <%aE>%nCommitter %cn <%ce> maps to %cN <%cE>%n" >actual &&
@@ -494,7 +540,7 @@ test_expect_success 'gitmailmap(5) example output: example #2' '
 	Author Jane Doe <jane@laptop.(none)> maps to Jane Doe <jane@example.com>
 	Committer C O Mitter <committer@example.com> maps to C O Mitter <committer@example.com>
 
-	Author Jane D <jane@desktop.(none)> maps to Jane Doe <jane@example.com>
+	Author Jane D. <jane@desktop.(none)> maps to Jane Doe <jane@example.com>
 	Committer C O Mitter <committer@example.com> maps to C O Mitter <committer@example.com>
 	EOF
 	git -C doc log --reverse --pretty=format:"Author %an <%ae> maps to %aN <%aE>%nCommitter %cn <%ce> maps to %cN <%cE>%n" >actual &&
@@ -960,6 +1006,268 @@ test_expect_success SYMLINKS 'symlinks not respected in-tree' '
 	ln -s map .mailmap &&
 	git log -1 --format=%aE >actual &&
 	echo "orig@example.com" >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'prepare for cat-file --mailmap' '
+	rm -f .mailmap &&
+	git commit --allow-empty -m foo --author="Orig <orig@example.com>"
+'
+
+test_expect_success '--no-use-mailmap disables mailmap in cat-file' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-EOF &&
+	A U Thor <author@example.com> Orig <orig@example.com>
+	EOF
+	cat >expect <<-EOF &&
+	author Orig <orig@example.com>
+	EOF
+	git cat-file --no-use-mailmap commit HEAD >log &&
+	sed -n "/^author /s/\([^>]*>\).*/\1/p" log >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--use-mailmap enables mailmap in cat-file' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-EOF &&
+	A U Thor <author@example.com> Orig <orig@example.com>
+	EOF
+	cat >expect <<-EOF &&
+	author A U Thor <author@example.com>
+	EOF
+	git cat-file --use-mailmap commit HEAD >log &&
+	sed -n "/^author /s/\([^>]*>\).*/\1/p" log >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--no-mailmap disables mailmap in cat-file for annotated tag objects' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-EOF &&
+	Orig <orig@example.com> C O Mitter <committer@example.com>
+	EOF
+	cat >expect <<-EOF &&
+	tagger C O Mitter <committer@example.com>
+	EOF
+	git tag -a -m "annotated tag" v1 &&
+	git cat-file --no-mailmap -p v1 >log &&
+	sed -n "/^tagger /s/\([^>]*>\).*/\1/p" log >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--mailmap enables mailmap in cat-file for annotated tag objects' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-EOF &&
+	Orig <orig@example.com> C O Mitter <committer@example.com>
+	EOF
+	cat >expect <<-EOF &&
+	tagger Orig <orig@example.com>
+	EOF
+	git tag -a -m "annotated tag" v2 &&
+	git cat-file --mailmap -p v2 >log &&
+	sed -n "/^tagger /s/\([^>]*>\).*/\1/p" log >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file -s returns correct size with --use-mailmap' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	C O Mitter <committer@example.com> Orig <orig@example.com>
+	EOF
+	git cat-file commit HEAD >commit.out &&
+	echo $(wc -c <commit.out) >expect &&
+	git cat-file --use-mailmap commit HEAD >commit.out &&
+	echo $(wc -c <commit.out) >>expect &&
+	git cat-file -s HEAD >actual &&
+	git cat-file --use-mailmap -s HEAD >>actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file -s returns correct size with --use-mailmap for tag objects' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	Orig <orig@example.com> C O Mitter <committer@example.com>
+	EOF
+	git tag -a -m "annotated tag" v3 &&
+	git cat-file tag v3 >tag.out &&
+	echo $(wc -c <tag.out) >expect &&
+	git cat-file --use-mailmap tag v3 >tag.out &&
+	echo $(wc -c <tag.out) >>expect &&
+	git cat-file -s v3 >actual &&
+	git cat-file --use-mailmap -s v3 >>actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --batch-check returns correct size with --use-mailmap' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	C O Mitter <committer@example.com> Orig <orig@example.com>
+	EOF
+	git cat-file commit HEAD >commit.out &&
+	commit_size=$(wc -c <commit.out) &&
+	commit_sha=$(git rev-parse HEAD) &&
+	echo $commit_sha commit $commit_size >expect &&
+	git cat-file --use-mailmap commit HEAD >commit.out &&
+	commit_size=$(wc -c <commit.out) &&
+	echo $commit_sha commit $commit_size >>expect &&
+	echo "HEAD" >in &&
+	git cat-file --batch-check <in >actual &&
+	git cat-file --use-mailmap --batch-check <in >>actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --batch-command returns correct size with --use-mailmap' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	C O Mitter <committer@example.com> Orig <orig@example.com>
+	EOF
+	git cat-file commit HEAD >commit.out &&
+	commit_size=$(wc -c <commit.out) &&
+	commit_sha=$(git rev-parse HEAD) &&
+	echo $commit_sha commit $commit_size >expect &&
+	git cat-file --use-mailmap commit HEAD >commit.out &&
+	commit_size=$(wc -c <commit.out) &&
+	echo $commit_sha commit $commit_size >>expect &&
+	echo "info HEAD" >in &&
+	git cat-file --batch-command <in >actual &&
+	git cat-file --use-mailmap --batch-command <in >>actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --batch-command mailmap yes enables mailmap mid-stream' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	C O Mitter <committer@example.com> Orig <orig@example.com>
+	EOF
+	commit_sha=$(git rev-parse HEAD) &&
+	git cat-file commit HEAD >commit_no_mailmap.out &&
+	git cat-file --use-mailmap commit HEAD >commit_mailmap.out &&
+	size_no_mailmap=$(wc -c <commit_no_mailmap.out) &&
+	size_mailmap=$(wc -c <commit_mailmap.out) &&
+	printf "info HEAD\nmailmap yes\ninfo HEAD\n" | git cat-file --batch-command >actual &&
+	echo $commit_sha commit $size_no_mailmap >expect &&
+	echo $commit_sha commit $size_mailmap >>expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --batch-command mailmap no disables mailmap mid-stream' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	C O Mitter <committer@example.com> Orig <orig@example.com>
+	EOF
+	commit_sha=$(git rev-parse HEAD) &&
+	git cat-file commit HEAD >commit_no_mailmap.out &&
+	git cat-file --use-mailmap commit HEAD >commit_mailmap.out &&
+	size_no_mailmap=$(wc -c <commit_no_mailmap.out) &&
+	size_mailmap=$(wc -c <commit_mailmap.out) &&
+	printf "mailmap yes\ninfo HEAD\nmailmap no\ninfo HEAD\n" | git cat-file --batch-command >actual &&
+	echo $commit_sha commit $size_mailmap >expect &&
+	echo $commit_sha commit $size_no_mailmap >>expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --batch-command mailmap works in --buffer mode' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	C O Mitter <committer@example.com> Orig <orig@example.com>
+	EOF
+	commit_sha=$(git rev-parse HEAD) &&
+	git cat-file commit HEAD >commit_no_mailmap.out &&
+	git cat-file --use-mailmap commit HEAD >commit_mailmap.out &&
+	size_no_mailmap=$(wc -c <commit_no_mailmap.out) &&
+	size_mailmap=$(wc -c <commit_mailmap.out) &&
+	printf "mailmap yes\ninfo HEAD\nmailmap no\ninfo HEAD\nflush\n" | git cat-file --batch-command --buffer >actual &&
+	echo $commit_sha commit $size_mailmap >expect &&
+	echo $commit_sha commit $size_no_mailmap >>expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --batch-command mailmap no overrides startup --mailmap' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	C O Mitter <committer@example.com> Orig <orig@example.com>
+	EOF
+	commit_sha=$(git rev-parse HEAD) &&
+	git cat-file --use-mailmap commit HEAD >commit_mailmap.out &&
+	size_mailmap=$(wc -c <commit_mailmap.out) &&
+	git cat-file commit HEAD >commit_no_mailmap.out &&
+	size_no_mailmap=$(wc -c <commit_no_mailmap.out) &&
+	printf "info HEAD\nmailmap no\ninfo HEAD\n" | \
+		git cat-file --mailmap --batch-command >actual &&
+	echo $commit_sha commit $size_mailmap >expect &&
+	echo $commit_sha commit $size_no_mailmap >>expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --batch-command mailmap yes overrides startup --no-mailmap' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	C O Mitter <committer@example.com> Orig <orig@example.com>
+	EOF
+	commit_sha=$(git rev-parse HEAD) &&
+	git cat-file commit HEAD >commit_no_mailmap.out &&
+	size_no_mailmap=$(wc -c <commit_no_mailmap.out) &&
+	git cat-file --use-mailmap commit HEAD >commit_mailmap.out &&
+	size_mailmap=$(wc -c <commit_mailmap.out) &&
+	printf "info HEAD\nmailmap yes\ninfo HEAD\n" | \
+		git cat-file --no-mailmap --batch-command >actual &&
+	echo $commit_sha commit $size_no_mailmap >expect &&
+	echo $commit_sha commit $size_mailmap >>expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --batch-command mailmap accepts true/false' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	C O Mitter <committer@example.com> Orig <orig@example.com>
+	EOF
+	commit_sha=$(git rev-parse HEAD) &&
+	git cat-file commit HEAD >commit_no_mailmap.out &&
+	size_no_mailmap=$(wc -c <commit_no_mailmap.out) &&
+	git cat-file --use-mailmap commit HEAD >commit_mailmap.out &&
+	size_mailmap=$(wc -c <commit_mailmap.out) &&
+	printf "mailmap true\ninfo HEAD\nmailmap false\ninfo HEAD\n" | \
+		git cat-file --batch-command >actual &&
+	echo $commit_sha commit $size_mailmap >expect &&
+	echo $commit_sha commit $size_no_mailmap >>expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --batch-command mailmap rejects invalid boolean' '
+	echo "mailmap maybe" >in &&
+	test_must_fail git cat-file --batch-command <in 2>err &&
+	test_grep "mailmap: invalid boolean .*maybe" err
+'
+
+test_expect_success 'git cat-file --mailmap works with different author and committer' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	Mailmapped User <mailmapped-user@gitlab.com> C O Mitter <committer@example.com>
+	EOF
+	git commit --allow-empty -m "different author/committer" \
+		--author="Different Author <different@example.com>" &&
+	cat >expect <<-\EOF &&
+	author Different Author <different@example.com>
+	committer Mailmapped User <mailmapped-user@gitlab.com>
+	EOF
+	git cat-file --mailmap commit HEAD >log &&
+	sed -n -e "/^author /s/>.*/>/p" -e "/^committer /s/>.*/>/p" log >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git cat-file --mailmap maps both author and committer when both need mapping' '
+	test_when_finished "rm .mailmap" &&
+	cat >.mailmap <<-\EOF &&
+	Mapped Author <mapped-author@example.com> <different@example.com>
+	Mapped Committer <mapped-committer@example.com> C O Mitter <committer@example.com>
+	EOF
+	git commit --allow-empty -m "both author and committer mapped" \
+		--author="Different Author <different@example.com>" &&
+	cat >expect <<-\EOF &&
+	author Mapped Author <mapped-author@example.com>
+	committer Mapped Committer <mapped-committer@example.com>
+	EOF
+	git cat-file --mailmap commit HEAD >log &&
+	sed -n -e "/^author /s/>.*/>/p" -e "/^committer /s/>.*/>/p" log >actual &&
 	test_cmp expect actual
 '
 

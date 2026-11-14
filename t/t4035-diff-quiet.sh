@@ -2,7 +2,6 @@
 
 test_description='Return value of diffs'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -49,6 +48,10 @@ test_expect_success 'echo HEAD | git diff-tree --stdin' '
 '
 test_expect_success 'git diff-tree HEAD HEAD' '
 	test_expect_code 0 git diff-tree --quiet HEAD HEAD >cnt &&
+	test_line_count = 0 cnt
+'
+test_expect_success 'git diff-tree -w HEAD^ HEAD' '
+	test_expect_code 1 git diff-tree --quiet -w HEAD^ HEAD >cnt &&
 	test_line_count = 0 cnt
 '
 test_expect_success 'git diff-files' '

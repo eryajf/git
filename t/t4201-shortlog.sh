@@ -83,6 +83,13 @@ test_expect_success 'pretty format' '
 	test_cmp expect log.predictable
 '
 
+test_expect_success 'pretty format (with --date)' '
+	sed "s/SUBJECT/2005-04-07 OBJECT_NAME/" expect.template >expect &&
+	git shortlog --format="%ad %H" --date=short HEAD >log &&
+	fuzz log >log.predictable &&
+	test_cmp expect log.predictable
+'
+
 test_expect_success '--abbrev' '
 	sed s/SUBJECT/OBJID/ expect.template >expect &&
 	git shortlog --format="%h" --abbrev=35 HEAD >log &&
@@ -97,8 +104,10 @@ test_expect_success 'output from user-defined format is re-wrapped' '
 	test_cmp expect log.predictable
 '
 
-test_expect_success !MINGW 'shortlog wrapping' '
-	cat >expect <<\EOF &&
+test_expect_success !MINGW,ICONV 'shortlog wrapping' '
+	# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+	# that contain multibyte chars.
+	cat >expect <<EOF &&
 A U Thor (5):
       Test
       This is a very, very long first line for the commit message to see if
@@ -118,13 +127,13 @@ EOF
 	test_cmp expect out
 '
 
-test_expect_success !MINGW 'shortlog from non-git directory' '
+test_expect_success !MINGW,ICONV 'shortlog from non-git directory' '
 	git log --no-expand-tabs HEAD >log &&
 	GIT_DIR=non-existing git shortlog -w <log >out &&
 	test_cmp expect out
 '
 
-test_expect_success !MINGW 'shortlog can read --format=raw output' '
+test_expect_success !MINGW,ICONV 'shortlog can read --format=raw output' '
 	git log --format=raw HEAD >log &&
 	GIT_DIR=non-existing git shortlog -w <log >out &&
 	test_cmp expect out
@@ -132,7 +141,11 @@ test_expect_success !MINGW 'shortlog can read --format=raw output' '
 
 test_expect_success 'shortlog from non-git directory refuses extra arguments' '
 	test_must_fail env GIT_DIR=non-existing git shortlog foo 2>out &&
-	test_i18ngrep "too many arguments" out
+	test_grep "too many arguments" out
+'
+
+test_expect_success 'shortlog --author from non-git directory does not segfault' '
+	nongit git shortlog --author=author </dev/null
 '
 
 test_expect_success 'shortlog should add newline when input line matches wraplen' '
@@ -174,7 +187,7 @@ $DSCHO (2):
 
 EOF
 
-test_expect_success !MINGW 'shortlog encoding' '
+test_expect_success !MINGW,ICONV 'shortlog encoding' '
 	git reset --hard "$commit" &&
 	git config --unset i18n.commitencoding &&
 	echo 2 > a1 &&
@@ -237,6 +250,26 @@ test_expect_success 'shortlog --group=trailer:signed-off-by' '
 	test_cmp expect actual
 '
 
+test_expect_success 'shortlog --group=format' '
+	git shortlog -s --date="format:%Y" --group="format:%cN (%cd)" \
+		HEAD >actual &&
+	cat >expect <<-\EOF &&
+	     4	C O Mitter (2005)
+	     1	Sin Nombre (2005)
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'shortlog --group=<format> DWIM' '
+	git shortlog -s --date="format:%Y" --group="%cN (%cd)" HEAD >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'shortlog bogus --group' '
+	test_must_fail git shortlog --group=bogus HEAD 2>err &&
+	test_grep "unknown group type" err
+'
+
 test_expect_success 'trailer idents are split' '
 	cat >expect <<-\EOF &&
 	     2	C O Mitter
@@ -285,6 +318,38 @@ test_expect_success 'shortlog de-duplicates trailers in a single commit' '
 	test_cmp expect actual
 '
 
+# Trailers that have unfolded (single line) and folded (multiline) values which
+# are otherwise identical are treated as the same trailer for de-duplication.
+test_expect_success 'shortlog de-duplicates trailers in a single commit (folded/unfolded values)' '
+	git commit --allow-empty -F - <<-\EOF &&
+	subject one
+
+	this message has two distinct values, plus a repeat (folded)
+
+	Repeated-trailer: Foo foo foo
+	Repeated-trailer: Bar
+	Repeated-trailer: Foo
+	  foo foo
+	EOF
+
+	git commit --allow-empty -F - <<-\EOF &&
+	subject two
+
+	similar to the previous, but without the second distinct value
+
+	Repeated-trailer: Foo foo foo
+	Repeated-trailer: Foo
+	  foo foo
+	EOF
+
+	cat >expect <<-\EOF &&
+	     2	Foo foo foo
+	     1	Bar
+	EOF
+	git shortlog -ns --group=trailer:repeated-trailer -2 HEAD >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'shortlog can match multiple groups' '
 	git commit --allow-empty -F - <<-\EOF &&
 	subject one
@@ -316,6 +381,18 @@ test_expect_success 'shortlog can match multiple groups' '
 		--group=trailer:some-trailer \
 		--group=trailer:another-trailer \
 		-2 HEAD >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'shortlog can match multiple format groups' '
+	GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" \
+		git commit --allow-empty -m "identical names" &&
+	test_tick &&
+	cat >expect <<-\EOF &&
+	     2	A U Thor
+	     1	C O Mitter
+	EOF
+	git shortlog -ns --group="%cn" --group="%an" -2 HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -357,6 +434,17 @@ test_expect_success '--no-group resets trailer list' '
 test_expect_success 'stdin with multiple groups reports error' '
 	git log >log &&
 	test_must_fail git shortlog --group=author --group=committer <log
+'
+
+test_expect_success 'invalid revision options are not reported as unknown' '
+	test_must_fail git shortlog --default 2>err &&
+	test_grep "bad --default argument" err &&
+	test_grep ! "unknown option" err
+'
+
+test_expect_success 'unknown revision options are reported correctly' '
+	test_must_fail git shortlog -n --no-such-option 2>err &&
+	test_grep "unknown option .*--no-such-option" err
 '
 
 test_done

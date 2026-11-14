@@ -1,10 +1,20 @@
-#include "cache.h"
-#include "config.h"
+#define USE_THE_REPOSITORY_VARIABLE
+
+#include "git-compat-util.h"
+#include "abspath.h"
+#include "parse.h"
 #include "dir.h"
+#include "environment.h"
+#include "gettext.h"
 #include "pathspec.h"
 #include "attr.h"
+#include "read-cache.h"
+#include "repository.h"
+#include "setup.h"
 #include "strvec.h"
+#include "symlinks.h"
 #include "quote.h"
+#include "wildmatch.h"
 
 /*
  * Finds which of the given pathspecs match items in the index.
@@ -24,7 +34,7 @@ void add_pathspec_matches_against_index(const struct pathspec *pathspec,
 					char *seen,
 					enum ps_skip_worktree_action sw_action)
 {
-	int num_unmatched = 0, i;
+	int num_unmatched = 0;
 
 	/*
 	 * Since we are walking the index as if we were walking the directory,
@@ -32,12 +42,12 @@ void add_pathspec_matches_against_index(const struct pathspec *pathspec,
 	 * mistakenly think that the user gave a pathspec that did not match
 	 * anything.
 	 */
-	for (i = 0; i < pathspec->nr; i++)
+	for (int i = 0; i < pathspec->nr; i++)
 		if (!seen[i])
 			num_unmatched++;
 	if (!num_unmatched)
 		return;
-	for (i = 0; i < istate->cache_nr; i++) {
+	for (unsigned int i = 0; i < istate->cache_nr; i++) {
 		const struct cache_entry *ce = istate->cache[i];
 		if (sw_action == PS_IGNORE_SKIP_WORKTREE &&
 		    (ce_skip_worktree(ce) || !path_in_sparse_checkout(ce->name, istate)))
@@ -67,7 +77,7 @@ char *find_pathspecs_matching_skip_worktree(const struct pathspec *pathspec)
 {
 	struct index_state *istate = the_repository->index;
 	char *seen = xcalloc(pathspec->nr, 1);
-	int i;
+	unsigned int i;
 
 	for (i = 0; i < istate->cache_nr; i++) {
 		struct cache_entry *ce = istate->cache[i];
@@ -101,16 +111,37 @@ static struct pathspec_magic {
 	{ PATHSPEC_ATTR,    '\0', "attr" },
 };
 
-static void prefix_magic(struct strbuf *sb, int prefixlen, unsigned magic)
+static void prefix_magic(struct strbuf *sb, int prefixlen,
+			 unsigned magic, const char *element)
 {
-	int i;
-	strbuf_addstr(sb, ":(");
-	for (i = 0; i < ARRAY_SIZE(pathspec_magic); i++)
-		if (magic & pathspec_magic[i].bit) {
-			if (sb->buf[sb->len - 1] != '(')
-				strbuf_addch(sb, ',');
-			strbuf_addstr(sb, pathspec_magic[i].name);
+	/* No magic was found in element, just add prefix magic */
+	if (!magic) {
+		strbuf_addf(sb, ":(prefix:%d)", prefixlen);
+		return;
+	}
+
+	/*
+	 * At this point, we know that parse_element_magic() was able
+	 * to extract some pathspec magic from element. So we know
+	 * element is correctly formatted in either shorthand or
+	 * longhand form
+	 */
+	if (element[1] != '(') {
+		/* Process an element in shorthand form (e.g. ":!/<match>") */
+		strbuf_addstr(sb, ":(");
+		for (unsigned int i = 0; i < ARRAY_SIZE(pathspec_magic); i++) {
+			if ((magic & pathspec_magic[i].bit) &&
+			    pathspec_magic[i].mnemonic) {
+				if (sb->buf[sb->len - 1] != '(')
+					strbuf_addch(sb, ',');
+				strbuf_addstr(sb, pathspec_magic[i].name);
+			}
 		}
+	} else {
+		/* For the longhand form, we copy everything up to the final ')' */
+		size_t len = strchr(element, ')') - element;
+		strbuf_add(sb, element, len);
+	}
 	strbuf_addf(sb, ",prefix:%d)", prefixlen);
 }
 
@@ -170,8 +201,7 @@ static void parse_pathspec_attr_match(struct pathspec_item *item, const char *va
 	if (!value || !*value)
 		die(_("attr spec must not be empty"));
 
-	string_list_split(&list, value, ' ', -1);
-	string_list_remove_empty_items(&list, 0);
+	string_list_split_f(&list, value, " ", -1, STRING_LIST_SPLIT_NONEMPTY);
 
 	item->attr_check = attr_check_alloc();
 	CALLOC_ARRAY(item->attr_match, list.nr);
@@ -309,7 +339,7 @@ static const char *parse_long_magic(unsigned *magic, int *prefix_len,
 
 	for (pos = elem + 2; *pos && *pos != ')'; pos = nextat) {
 		size_t len = strcspn_escaped(pos, ",)");
-		int i;
+		unsigned int i;
 
 		if (pos[len] == ',')
 			nextat = pos + len + 1; /* handle ',' */
@@ -322,7 +352,7 @@ static const char *parse_long_magic(unsigned *magic, int *prefix_len,
 		if (starts_with(pos, "prefix:")) {
 			char *endptr;
 			*prefix_len = strtol(pos + 7, &endptr, 10);
-			if (endptr - pos != len)
+			if ((size_t)(endptr - pos) != len)
 				die(_("invalid parameter for pathspec magic 'prefix'"));
 			continue;
 		}
@@ -368,7 +398,7 @@ static const char *parse_short_magic(unsigned *magic, const char *elem)
 
 	for (pos = elem + 1; *pos && *pos != ':'; pos++) {
 		char ch = *pos;
-		int i;
+		unsigned int i;
 
 		/* Special case alias for '!' */
 		if (ch == '^') {
@@ -456,12 +486,17 @@ static void init_pathspec_item(struct pathspec_item *item, unsigned flags,
 		match = xstrdup(copyfrom);
 		prefixlen = 0;
 	} else {
-		match = prefix_path_gently(prefix, prefixlen,
+		match = prefix_path_gently(the_repository, prefix, prefixlen,
 					   &prefixlen, copyfrom);
 		if (!match) {
-			const char *hint_path = get_git_work_tree();
+			const char *hint_path;
+
+			if ((flags & PATHSPEC_NO_REPOSITORY) || !have_git_dir())
+				die(_("'%s' is outside the directory tree"),
+				    copyfrom);
+			hint_path = repo_get_work_tree(the_repository);
 			if (!hint_path)
-				hint_path = get_git_dir();
+				hint_path = repo_get_git_dir(the_repository);
 			die(_("%s: '%s' is outside repository at '%s'"), elt,
 			    copyfrom, absolute_path(hint_path));
 		}
@@ -480,7 +515,7 @@ static void init_pathspec_item(struct pathspec_item *item, unsigned flags,
 		struct strbuf sb = STRBUF_INIT;
 
 		/* Preserve the actual prefix length of each pattern */
-		prefix_magic(&sb, prefixlen, element_magic);
+		prefix_magic(&sb, prefixlen, element_magic, elt);
 
 		strbuf_addstr(&sb, match);
 		item->original = strbuf_detach(&sb, NULL);
@@ -525,27 +560,32 @@ static int pathspec_item_cmp(const void *a_, const void *b_)
 	return strcmp(a->match, b->match);
 }
 
-static void NORETURN unsupported_magic(const char *pattern,
-				       unsigned magic)
+void pathspec_magic_names(unsigned magic, struct strbuf *out)
 {
-	struct strbuf sb = STRBUF_INIT;
-	int i;
+	unsigned int i;
 	for (i = 0; i < ARRAY_SIZE(pathspec_magic); i++) {
 		const struct pathspec_magic *m = pathspec_magic + i;
 		if (!(magic & m->bit))
 			continue;
-		if (sb.len)
-			strbuf_addstr(&sb, ", ");
+		if (out->len)
+			strbuf_addstr(out, ", ");
 
 		if (m->mnemonic)
-			strbuf_addf(&sb, _("'%s' (mnemonic: '%c')"),
+			strbuf_addf(out, _("'%s' (mnemonic: '%c')"),
 				    m->name, m->mnemonic);
 		else
-			strbuf_addf(&sb, "'%s'", m->name);
+			strbuf_addf(out, "'%s'", m->name);
 	}
+}
+
+static void NORETURN unsupported_magic(const char *pattern,
+				       unsigned magic)
+{
+	struct strbuf sb = STRBUF_INIT;
+	pathspec_magic_names(magic, &sb);
 	/*
 	 * We may want to substitute "this command" with a command
-	 * name. E.g. when add--interactive dies when running
+	 * name. E.g. when "git add -p" or "git add -i" dies when running
 	 * "checkout -p"
 	 */
 	die(_("%s: pathspec magic not supported by this command: %s"),
@@ -572,6 +612,10 @@ void parse_pathspec(struct pathspec *pathspec,
 	if ((flags & PATHSPEC_PREFER_CWD) &&
 	    (flags & PATHSPEC_PREFER_FULL))
 		BUG("PATHSPEC_PREFER_CWD and PATHSPEC_PREFER_FULL are incompatible");
+
+	if ((flags & PATHSPEC_NO_REPOSITORY) &&
+	    (~magic_mask & (PATHSPEC_ATTR | PATHSPEC_FROMTOP)))
+		BUG("PATHSPEC_NO_REPOSITORY is incompatible with PATHSPEC_ATTR and PATHSPEC_FROMTOP");
 
 	/* No arguments with prefix -> prefix pathspec */
 	if (!entry) {
@@ -681,8 +725,7 @@ void copy_pathspec(struct pathspec *dst, const struct pathspec *src)
 	int i, j;
 
 	*dst = *src;
-	ALLOC_ARRAY(dst->items, dst->nr);
-	COPY_ARRAY(dst->items, src->items, dst->nr);
+	DUP_ARRAY(dst->items, src->items, dst->nr);
 
 	for (i = 0; i < dst->nr; i++) {
 		struct pathspec_item *d = &dst->items[i];
@@ -691,8 +734,7 @@ void copy_pathspec(struct pathspec *dst, const struct pathspec *src)
 		d->match = xstrdup(s->match);
 		d->original = xstrdup(s->original);
 
-		ALLOC_ARRAY(d->attr_match, d->attr_match_nr);
-		COPY_ARRAY(d->attr_match, s->attr_match, d->attr_match_nr);
+		DUP_ARRAY(d->attr_match, s->attr_match, d->attr_match_nr);
 		for (j = 0; j < d->attr_match_nr; j++) {
 			const char *value = s->attr_match[j].value;
 			d->attr_match[j].value = xstrdup_or_null(value);
@@ -707,8 +749,8 @@ void clear_pathspec(struct pathspec *pathspec)
 	int i, j;
 
 	for (i = 0; i < pathspec->nr; i++) {
-		free(pathspec->items[i].match);
-		free(pathspec->items[i].original);
+		free((void *)pathspec->items[i].match);
+		free((void *)pathspec->items[i].original);
 
 		for (j = 0; j < pathspec->items[i].attr_match_nr; j++)
 			free(pathspec->items[i].attr_match[j].value);
@@ -758,4 +800,96 @@ int match_pathspec_attrs(struct index_state *istate,
 	}
 
 	return 1;
+}
+
+int pathspec_needs_expanded_index(struct index_state *istate,
+				  const struct pathspec *pathspec)
+{
+	unsigned int pos;
+	int i, res = 0;
+	char *skip_worktree_seen = NULL;
+
+	/*
+	 * If index is not sparse, no index expansion is needed.
+	 */
+	if (!istate->sparse_index)
+		return 0;
+
+	/*
+	 * When using a magic pathspec, assume for the sake of simplicity that
+	 * the index needs to be expanded to match all matchable files.
+	 */
+	if (pathspec->magic)
+		return 1;
+
+	for (i = 0; i < pathspec->nr; i++) {
+		struct pathspec_item item = pathspec->items[i];
+
+		/*
+		 * If the pathspec item has a wildcard, the index should be expanded
+		 * if the pathspec has the possibility of matching a subset of entries inside
+		 * of a sparse directory (but not the entire directory).
+		 *
+		 * If the pathspec item is a literal path, the index only needs to be expanded
+		 * if a) the pathspec isn't in the sparse checkout cone (to make sure we don't
+		 * expand for in-cone files) and b) it doesn't match any sparse directories
+		 * (since we can reset whole sparse directories without expanding them).
+		 */
+		if (item.nowildcard_len < item.len) {
+			/*
+			 * Special case: if the pattern is a path inside the cone
+			 * followed by only wildcards, the pattern cannot match
+			 * partial sparse directories, so we know we don't need to
+			 * expand the index.
+			 *
+			 * Examples:
+			 * - in-cone/foo***: doesn't need expanded index
+			 * - not-in-cone/bar*: may need expanded index
+			 * - **.c: may need expanded index
+			 */
+			if (strspn(item.match + item.nowildcard_len, "*") ==
+				    (unsigned int)(item.len - item.nowildcard_len) &&
+			    path_in_cone_mode_sparse_checkout(item.match, istate))
+				continue;
+
+			for (pos = 0; pos < istate->cache_nr; pos++) {
+				struct cache_entry *ce = istate->cache[pos];
+
+				if (!S_ISSPARSEDIR(ce->ce_mode))
+					continue;
+
+				/*
+				 * If the pre-wildcard length is longer than the sparse
+				 * directory name and the sparse directory is the first
+				 * component of the pathspec, need to expand the index.
+				 */
+				if ((unsigned int)item.nowildcard_len >
+					    ce_namelen(ce) &&
+				    !strncmp(item.match, ce->name,
+					     ce_namelen(ce))) {
+					res = 1;
+					break;
+				}
+
+				/*
+				 * If the pre-wildcard length is shorter than the sparse
+				 * directory and the pathspec does not match the whole
+				 * directory, need to expand the index.
+				 */
+				if (!strncmp(item.match, ce->name, item.nowildcard_len) &&
+				    wildmatch(item.match, ce->name, 0)) {
+					res = 1;
+					break;
+				}
+			}
+		} else if (!path_in_cone_mode_sparse_checkout(item.match, istate) &&
+			   !matches_skip_worktree(pathspec, i, &skip_worktree_seen))
+			res = 1;
+
+		if (res > 0)
+			break;
+	}
+
+	free(skip_worktree_seen);
+	return res;
 }

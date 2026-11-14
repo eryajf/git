@@ -6,7 +6,6 @@
 test_description='Binary diff and apply
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 cat >expect.binary-numstat <<\EOF
@@ -69,7 +68,7 @@ test_expect_success 'apply detecting corrupt patch correctly' '
 	sed -e "s/-CIT/xCIT/" <output >broken &&
 	test_must_fail git apply --stat --summary broken 2>detected &&
 	detected=$(cat detected) &&
-	detected=$(expr "$detected" : "error.*at line \\([0-9]*\\)\$") &&
+	detected=$(expr "$detected" : "error.*broken:\\([0-9]*\\)\$") &&
 	detected=$(sed -ne "${detected}p" broken) &&
 	test "$detected" = xCIT
 '
@@ -78,7 +77,7 @@ test_expect_success 'apply detecting corrupt patch correctly' '
 	git diff --binary | sed -e "s/-CIT/xCIT/" >broken &&
 	test_must_fail git apply --stat --summary broken 2>detected &&
 	detected=$(cat detected) &&
-	detected=$(expr "$detected" : "error.*at line \\([0-9]*\\)\$") &&
+	detected=$(expr "$detected" : "error.*broken:\\([0-9]*\\)\$") &&
 	detected=$(sed -ne "${detected}p" broken) &&
 	test "$detected" = xCIT
 '
@@ -113,20 +112,20 @@ test_expect_success 'diff --no-index with binary creation' '
 '
 
 cat >expect <<EOF
- binfile  |   Bin 0 -> 1026 bytes
- textfile | 10000 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ binfilë  |   Bin 0 -> 1026 bytes
+ tëxtfilë | 10000 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 EOF
 
 test_expect_success 'diff --stat with binary files and big change count' '
-	printf "\01\00%1024d" 1 >binfile &&
-	git add binfile &&
+	printf "\01\00%1024d" 1 >binfilë &&
+	git add binfilë &&
 	i=0 &&
 	while test $i -lt 10000; do
 		echo $i &&
 		i=$(($i + 1)) || return 1
-	done >textfile &&
-	git add textfile &&
-	git diff --cached --stat binfile textfile >output &&
+	done >tëxtfilë &&
+	git add tëxtfilë &&
+	git -c core.quotepath=false diff --cached --stat binfilë tëxtfilë >output &&
 	grep " | " output >actual &&
 	test_cmp expect actual
 '

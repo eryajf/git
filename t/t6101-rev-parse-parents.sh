@@ -8,7 +8,6 @@ test_description='Test git rev-parse with different parent options'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 TEST_CREATE_REPO_NO_TEMPLATE=1
 . ./test-lib.sh
 
@@ -40,7 +39,8 @@ test_expect_success 'setup' '
 '
 
 test_expect_success 'start is valid' '
-	git rev-parse start | grep "^$OID_REGEX$"
+	git rev-parse start >actual &&
+	test_grep "^$OID_REGEX$" actual
 '
 
 test_expect_success 'start^0' '

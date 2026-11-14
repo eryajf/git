@@ -8,7 +8,6 @@ test_description='git svn basic tests'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_FAILS_SANITIZE_LEAK=true
 . ./lib-git-svn.sh
 
 prepare_utf8_locale
@@ -22,7 +21,7 @@ test_expect_success 'git svn help works anywhere' '
 '
 
 test_expect_success \
-    'initialize git svn' '
+	'initialize git svn' '
 	mkdir import &&
 	(
 		cd import &&
@@ -39,9 +38,9 @@ test_expect_success \
 	rm -rf import &&
 	git svn init "$svnrepo"'
 
-test_expect_success \
-    'import an SVN revision into git' \
-    'git svn fetch'
+test_expect_success 'import an SVN revision into git' '
+	git svn fetch
+'
 
 test_expect_success "checkout from svn" 'svn co "$svnrepo" "$SVN_TREE"'
 
@@ -233,28 +232,27 @@ test_expect_success POSIXPERM,SYMLINKS "$name" '
 	test_cmp expected.$(test_oid algo) a
 '
 
-test_expect_success 'exit if remote refs are ambigious' '
-        git config --add svn-remote.svn.fetch \
+test_expect_success 'exit if remote refs are ambiguous' '
+	git config --add svn-remote.svn.fetch \
 		bar:refs/remotes/git-svn &&
 	test_must_fail git svn migrate
 '
 
 test_expect_success 'exit if init-ing a would clobber a URL' '
-        svnadmin create "${PWD}/svnrepo2" &&
-        svn mkdir -m "mkdir bar" "${svnrepo}2/bar" &&
-        git config --unset svn-remote.svn.fetch \
+	svnadmin create "${PWD}/svnrepo2" &&
+	svn mkdir -m "mkdir bar" "${svnrepo}2/bar" &&
+	git config --unset svn-remote.svn.fetch \
 		"^bar:refs/remotes/git-svn$" &&
 	test_must_fail git svn init "${svnrepo}2/bar"
         '
 
-test_expect_success \
-  'init allows us to connect to another directory in the same repo' '
-        git svn init --minimize-url -i bar "$svnrepo/bar" &&
-        git config --get svn-remote.svn.fetch \
-                              "^bar:refs/remotes/bar$" &&
-        git config --get svn-remote.svn.fetch \
-			      "^:refs/remotes/git-svn$"
-        '
+test_expect_success 'init allows us to connect to another directory in the same repo' '
+	git svn init --minimize-url -i bar "$svnrepo/bar" &&
+	git config --get svn-remote.svn.fetch \
+		"^bar:refs/remotes/bar$" &&
+	git config --get svn-remote.svn.fetch \
+		"^:refs/remotes/git-svn$"
+'
 
 test_expect_success 'dcommit $rev does not clobber current branch' '
 	git svn fetch -i bar &&

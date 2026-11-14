@@ -1,5 +1,9 @@
-#include "cache.h"
-#include "config.h"
+#define USE_THE_REPOSITORY_VARIABLE
+
+#include "git-compat-util.h"
+#include "parse.h"
+#include "environment.h"
+#include "repository.h"
 #include "run-command.h"
 #include "strbuf.h"
 #include "prompt.h"
@@ -48,7 +52,7 @@ char *git_prompt(const char *prompt, int flags)
 
 		askpass = getenv("GIT_ASKPASS");
 		if (!askpass)
-			askpass = askpass_program;
+			askpass = repo_config_values(the_repository)->askpass_program;
 		if (!askpass)
 			askpass = getenv("SSH_ASKPASS");
 		if (askpass && *askpass)
@@ -74,12 +78,6 @@ char *git_prompt(const char *prompt, int flags)
 
 int git_read_line_interactively(struct strbuf *line)
 {
-	int ret;
-
 	fflush(stdout);
-	ret = strbuf_getline_lf(line, stdin);
-	if (ret != EOF)
-		strbuf_trim_trailing_newline(line);
-
-	return ret;
+	return strbuf_getline(line, stdin);
 }

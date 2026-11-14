@@ -1,14 +1,24 @@
 /*
  * Copyright (C) 2008 Linus Torvalds
  */
-#include "cache.h"
+
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
 #include "pathspec.h"
 #include "dir.h"
+#include "environment.h"
 #include "fsmonitor.h"
-#include "config.h"
+#include "gettext.h"
+#include "parse.h"
+#include "preload-index.h"
 #include "progress.h"
+#include "read-cache.h"
 #include "thread-utils.h"
 #include "repository.h"
+#include "symlinks.h"
+#include "trace2.h"
+#include "config.h"
 
 /*
  * Mostly randomly chosen maximum thread counts: we
@@ -101,6 +111,9 @@ void preload_index(struct index_state *index,
 	struct thread_data data[MAX_PARALLEL];
 	struct progress_data pd;
 	int t2_sum_lstat = 0;
+	int core_preload_index = 1;
+
+	repo_config_get_bool(index->repo, "core.preloadindex", &core_preload_index);
 
 	if (!HAVE_THREADS || !core_preload_index)
 		return;
@@ -122,7 +135,9 @@ void preload_index(struct index_state *index,
 
 	memset(&pd, 0, sizeof(pd));
 	if (refresh_flags & REFRESH_PROGRESS && isatty(2)) {
-		pd.progress = start_delayed_progress(_("Refreshing index"), index->cache_nr);
+		pd.progress = start_delayed_progress(index->repo,
+						     _("Refreshing index"),
+						     index->cache_nr);
 		pthread_mutex_init(&pd.mutex, NULL);
 	}
 
@@ -150,6 +165,12 @@ void preload_index(struct index_state *index,
 		t2_sum_lstat += p->t2_nr_lstat;
 	}
 	stop_progress(&pd.progress);
+
+	if (pathspec) {
+		/* earlier we made deep copies for each thread to work with */
+		for (i = 0; i < threads; i++)
+			clear_pathspec(&data[i].pathspec);
+	}
 
 	trace_performance_leave("preload index");
 

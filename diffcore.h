@@ -4,9 +4,11 @@
 #ifndef DIFFCORE_H
 #define DIFFCORE_H
 
-#include "cache.h"
+#include "hash.h"
 
 struct diff_options;
+struct mem_pool;
+struct oid_array;
 struct repository;
 struct strintmap;
 struct strmap;
@@ -16,6 +18,17 @@ struct userdiff_driver;
  * (e.g. diffcore-rename, diffcore-pickaxe).  Never include this header
  * in anything else.
  */
+
+/* A range [start, end).  Lines are numbered starting at 0. */
+struct range {
+	long start, end;
+};
+
+/* A set of ranges.  The ranges must always be disjoint and sorted. */
+struct range_set {
+	unsigned int alloc, nr;
+	struct range *ranges;
+};
 
 /* We internally use unsigned short as the score value,
  * and rely on an int capable to hold 32-bits.  -B can take
@@ -104,8 +117,13 @@ int diff_filespec_is_binary(struct repository *, struct diff_filespec *);
 struct diff_filepair {
 	struct diff_filespec *one;
 	struct diff_filespec *two;
+	/*
+	 * Tracked line ranges for -L filtering; borrowed from
+	 * line_log_data and must not be freed.
+	 */
+	const struct range_set *line_ranges;
 	unsigned short int score;
-	char status; /* M C R A D U etc. (see Documentation/diff-format.txt or DIFF_STATUS_* in diff.h) */
+	char status; /* M C R A D U etc. (see Documentation/diff-format.adoc or DIFF_STATUS_* in diff.h) */
 	unsigned broken_pair : 1;
 	unsigned renamed_pair : 1;
 	unsigned is_unmerged : 1;
@@ -151,11 +169,10 @@ struct diff_queue_struct {
 	int nr;
 };
 
-#define DIFF_QUEUE_CLEAR(q) \
-	do { \
-		(q)->queue = NULL; \
-		(q)->nr = (q)->alloc = 0; \
-	} while (0)
+#define DIFF_QUEUE_INIT { 0 }
+
+void diff_queue_init(struct diff_queue_struct *q);
+void diff_queue_clear(struct diff_queue_struct *q);
 
 extern struct diff_queue_struct diff_queued_diff;
 struct diff_filepair *diff_queue(struct diff_queue_struct *,

@@ -1,11 +1,8 @@
 #ifndef SUBMODULE_CONFIG_CACHE_H
 #define SUBMODULE_CONFIG_CACHE_H
 
-#include "cache.h"
 #include "config.h"
-#include "hashmap.h"
 #include "submodule.h"
-#include "strbuf.h"
 #include "tree-walk.h"
 
 /**
@@ -51,7 +48,8 @@ struct repository;
 
 void submodule_cache_free(struct submodule_cache *cache);
 
-int parse_submodule_fetchjobs(const char *var, const char *value);
+int parse_submodule_fetchjobs(const char *var, const char *value,
+			      const struct key_value_info *kvi);
 int parse_fetch_recurse_submodules_arg(const char *opt, const char *arg);
 struct option;
 int option_fetch_parse_recurse_submodules(const struct option *opt,
@@ -59,7 +57,8 @@ int option_fetch_parse_recurse_submodules(const struct option *opt,
 int parse_update_recurse_submodules_arg(const char *opt, const char *arg);
 int parse_push_recurse_submodules_arg(const char *opt, const char *arg);
 void repo_read_gitmodules(struct repository *repo, int skip_if_read);
-void gitmodules_config_oid(const struct object_id *commit_oid);
+void gitmodules_config_oid(struct repository *repo,
+			   const struct object_id *commit_oid);
 
 /**
  * Same as submodule_from_path but lookup by name.
@@ -82,7 +81,8 @@ const struct submodule *submodule_from_path(struct repository *r,
 void submodule_free(struct repository *r);
 
 int print_config_from_gitmodules(struct repository *repo, const char *key);
-int config_set_in_gitmodules_file_gently(const char *key, const char *value);
+int config_set_in_gitmodules_file_gently(struct repository *repo,
+					 const char *key, const char *value);
 
 /*
  * Returns 0 if the name is syntactically acceptable as a submodule "name"
@@ -90,6 +90,9 @@ int config_set_in_gitmodules_file_gently(const char *key, const char *value);
  * otherwise.
  */
 int check_submodule_name(const char *name);
+
+/* Returns 0 if the URL valid per RFC3986 and -1 otherwise. */
+int check_submodule_url(const char *url);
 
 /*
  * Note: these helper functions exist solely to maintain backward
@@ -99,8 +102,10 @@ int check_submodule_name(const char *name);
  * New helpers to retrieve arbitrary configuration from the '.gitmodules' file
  * should NOT be added.
  */
-void fetch_config_from_gitmodules(int *max_children, int *recurse_submodules);
-void update_clone_config_from_gitmodules(int *max_jobs);
+void fetch_config_from_gitmodules(struct repository *repo,
+				  int *max_children,
+				  int *recurse_submodules);
+void update_clone_config_from_gitmodules(struct repository *repo, int *max_jobs);
 
 /*
  * Submodule entry that contains relevant information about a
@@ -135,4 +140,7 @@ struct submodule_entry_list {
 void submodules_of_tree(struct repository *r,
 			const struct object_id *treeish_name,
 			struct submodule_entry_list *ret);
+
+void submodule_entry_list_release(struct submodule_entry_list *list);
+
 #endif /* SUBMODULE_CONFIG_H */

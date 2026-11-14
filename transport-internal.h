@@ -1,10 +1,14 @@
 #ifndef TRANSPORT_INTERNAL_H
 #define TRANSPORT_INTERNAL_H
 
+#include "connect.h"
+
 struct ref;
 struct transport;
 struct strvec;
 struct transport_ls_refs_options;
+struct oid_array;
+struct fetch_object_info_results;
 
 struct transport_vtable {
 	/**
@@ -27,6 +31,13 @@ struct transport_vtable {
 				     struct transport_ls_refs_options *transport_options);
 
 	/**
+	 * Populates the remote side's bundle-uri under protocol v2,
+	 * if the "bundle-uri" capability was advertised. Returns 0 if
+	 * OK, negative values on error.
+	 */
+	int (*get_bundle_uri)(struct transport *transport);
+
+	/**
 	 * Fetch the objects for the given refs. Note that this gets
 	 * an array, and should ignore the list structure.
 	 *
@@ -35,6 +46,16 @@ struct transport_vtable {
 	 * provided refs now.
 	 **/
 	int (*fetch_refs)(struct transport *transport, int refs_nr, struct ref **refs);
+
+	/*
+	 * Fetch object info (only size currently) from remote without
+	 * downloading the objects.
+	 *
+	 * Uses object-info capability of v2 protocol.
+	 */
+	int (*fetch_object_info)(struct transport *transport,
+				 const struct oid_array *oids,
+				 struct fetch_object_info_results *results);
 
 	/**
 	 * Push the objects and refs. Send the necessary objects, and
@@ -51,7 +72,8 @@ struct transport_vtable {
 	 * process involved generating new commits.
 	 **/
 	int (*push_refs)(struct transport *transport, struct ref *refs, int flags);
-	int (*connect)(struct transport *connection, const char *name,
+	int (*connect)(struct transport *connection,
+		       enum git_connect_service service,
 		       const char *executable, int fd[2]);
 
 	/** get_refs_list(), fetch(), and push_refs() can keep

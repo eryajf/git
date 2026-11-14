@@ -7,7 +7,6 @@ test_description='test git fast-import of notes objects'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 
@@ -77,7 +76,7 @@ INPUT_END
 test_expect_success 'set up main branch' '
 
 	git fast-import <input &&
-	git whatchanged main
+	git log --raw main
 '
 
 commit4=$(git rev-parse refs/heads/main)

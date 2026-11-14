@@ -34,13 +34,13 @@ test_expect_success 'switch and detach' '
 
 test_expect_success 'suggestion to detach' '
 	test_must_fail git switch main^{commit} 2>stderr &&
-	grep "try again with the --detach option" stderr
+	test_grep "try again with the --detach option" stderr
 '
 
 test_expect_success 'suggestion to detach is suppressed with advice.suggestDetachingHead=false' '
 	test_config advice.suggestDetachingHead false &&
 	test_must_fail git switch main^{commit} 2>stderr &&
-	! grep "try again with the --detach option" stderr
+	test_grep ! "try again with the --detach option" stderr
 '
 
 test_expect_success 'switch and detach current branch' '
@@ -76,7 +76,7 @@ test_expect_success 'new orphan branch from empty' '
 	git switch --orphan new-orphan &&
 	test_commit orphan &&
 	git cat-file commit refs/heads/new-orphan >commit &&
-	! grep ^parent commit &&
+	test_grep ! ^parent commit &&
 	git ls-files >tracked-files &&
 	echo orphan.t >expected &&
 	test_cmp expected tracked-files
@@ -144,6 +144,57 @@ test_expect_success 'tracking info copied with autoSetupMerge=inherit' '
 	git switch -c main2 main &&
 	test_cmp_config "" --default "" branch.main2.remote &&
 	test_cmp_config "" --default "" branch.main2.merge
+'
+
+test_expect_success 'switch -c completes when tracking config cannot be written' '
+	test_when_finished "git update-ref -d refs/remotes/lockremote/lockbranch" &&
+	test_when_finished "git branch -D lock-new" &&
+	test_when_finished "git switch main" &&
+	test_config remote.lockremote.url . &&
+	test_config remote.lockremote.fetch "+refs/heads/*:refs/remotes/lockremote/*" &&
+	git update-ref refs/remotes/lockremote/lockbranch first-branch &&
+	test_when_finished "rm -f .git/config.lock" &&
+	>.git/config.lock &&
+	git -c core.configLockTimeout=0 \
+		switch -c lock-new lockremote/lockbranch 2>err &&
+	test_grep "unable to write upstream branch configuration" err &&
+	echo refs/heads/lock-new >expect &&
+	git symbolic-ref HEAD >actual &&
+	test_cmp expect actual &&
+	git diff --cached --exit-code &&
+	rm -f .git/config.lock &&
+	test_must_fail git config branch.lock-new.remote
+'
+
+test_expect_success 'switch back when temporarily detached and checked out elsewhere ' '
+	test_when_finished "
+		git worktree remove wt1 ||:
+		git worktree remove wt2 ||:
+		git checkout - ||:
+		git branch -D shared ||:
+	" &&
+	git checkout -b shared &&
+	test_commit shared-first &&
+	HASH1=$(git rev-parse --verify HEAD) &&
+	test_commit shared-second &&
+	test_commit shared-third &&
+	HASH2=$(git rev-parse --verify HEAD) &&
+	git worktree add wt1 -f shared &&
+	git -C wt1 bisect start &&
+	git -C wt1 bisect good $HASH1 &&
+	git -C wt1 bisect bad $HASH2 &&
+	git worktree add wt2 -f shared &&
+	git -C wt2 bisect start &&
+	git -C wt2 bisect good $HASH1 &&
+	git -C wt2 bisect bad $HASH2 &&
+	# we test in both worktrees to ensure that works
+	# as expected with "first" and "next" worktrees
+	test_must_fail git -C wt1 switch shared &&
+	test_must_fail git -C wt1 switch -C shared &&
+	git -C wt1 switch --ignore-other-worktrees shared &&
+	test_must_fail git -C wt2 switch shared &&
+	test_must_fail git -C wt2 switch -C shared &&
+	git -C wt2 switch --ignore-other-worktrees shared
 '
 
 test_done

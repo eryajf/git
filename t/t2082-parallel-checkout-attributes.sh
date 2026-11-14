@@ -28,12 +28,12 @@ test_expect_success 'parallel-checkout with ident' '
 		rm A B &&
 		test_checkout_workers 2 git reset --hard &&
 		hexsz=$(test_oid hexsz) &&
-		grep -E "\\\$Id: [0-9a-f]{$hexsz} \\\$" A &&
-		grep "\\\$Id\\\$" B
+		test_grep -E "\\\$Id: [0-9a-f]{$hexsz} \\\$" A &&
+		test_grep "\\\$Id\\\$" B
 	)
 '
 
-test_expect_success 'parallel-checkout with re-encoding' '
+test_expect_success ICONV 'parallel-checkout with re-encoding' '
 	set_checkout_config 2 0 &&
 	git init encoding &&
 	(
@@ -90,7 +90,7 @@ test_expect_success 'parallel-checkout with eol conversions' '
 
 # Entries that require an external filter are not eligible for parallel
 # checkout. Check that both the parallel-eligible and non-eligible entries are
-# properly writen in a single checkout operation.
+# properly written in a single checkout operation.
 #
 test_expect_success 'parallel-checkout and external filter' '
 	set_checkout_config 2 0 &&
@@ -138,12 +138,9 @@ test_expect_success 'parallel-checkout and external filter' '
 # The delayed queue is independent from the parallel queue, and they should be
 # able to work together in the same checkout process.
 #
-test_expect_success PERL 'parallel-checkout and delayed checkout' '
-	write_script rot13-filter.pl "$PERL_PATH" \
-		<"$TEST_DIRECTORY"/t0021/rot13-filter.pl &&
-
+test_expect_success 'parallel-checkout and delayed checkout' '
 	test_config_global filter.delay.process \
-		"\"$(pwd)/rot13-filter.pl\" --always-delay \"$(pwd)/delayed.log\" clean smudge delay" &&
+		"test-tool rot13-filter --always-delay --log=\"$(pwd)/delayed.log\" clean smudge delay" &&
 	test_config_global filter.delay.required true &&
 
 	echo "abcd" >original &&
@@ -178,15 +175,15 @@ test_expect_success PERL 'parallel-checkout and delayed checkout' '
 	verify_checkout delayed &&
 
 	# Check that the *.d files got to the delay queue and were filtered
-	grep "smudge W.d .* \[DELAYED\]" delayed.log &&
-	grep "smudge X.d .* \[DELAYED\]" delayed.log &&
+	test_grep "smudge W.d .* \[DELAYED\]" delayed.log &&
+	test_grep "smudge X.d .* \[DELAYED\]" delayed.log &&
 	test_cmp delayed/W.d original &&
 	test_cmp delayed/X.d original &&
 
 	# Check that the parallel-eligible entries went to the right queue and
 	# were not filtered
-	! grep "smudge Y .* \[DELAYED\]" delayed.log &&
-	! grep "smudge Z .* \[DELAYED\]" delayed.log &&
+	test_grep ! "smudge Y .* \[DELAYED\]" delayed.log &&
+	test_grep ! "smudge Z .* \[DELAYED\]" delayed.log &&
 	test_cmp delayed/Y original &&
 	test_cmp delayed/Z original
 '

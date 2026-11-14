@@ -80,8 +80,18 @@ test_expect_success 'check combined output (1)' '
 	verify_helper sidewithone
 '
 
+test_expect_success 'check combined output (1) with git diff <rev>^!' '
+	git diff sidewithone^! -- >sidewithone &&
+	verify_helper sidewithone
+'
+
 test_expect_success 'check combined output (2)' '
 	git show sidesansone -- >sidesansone &&
+	verify_helper sidesansone
+'
+
+test_expect_success 'check combined output (2) with git diff <rev>^!' '
+	git diff sidesansone^! -- >sidesansone &&
 	verify_helper sidesansone
 '
 
@@ -90,7 +100,7 @@ test_expect_success 'diagnose truncated file' '
 	git add file &&
 	git commit --amend -C HEAD &&
 	git show >out &&
-	grep "diff --cc file" out
+	test_grep "diff --cc file" out
 '
 
 test_expect_success 'setup for --cc --raw' '
@@ -108,13 +118,13 @@ test_expect_success 'check --cc --raw with four trees' '
 	four_trees=$(echo "$trees" | sed -e 4q) &&
 	git diff --cc --raw $four_trees $base_tree >out &&
 	# Check for four leading colons in the output:
-	grep "^::::[^:]" out
+	test_grep "^::::[^:]" out
 '
 
 test_expect_success 'check --cc --raw with forty trees' '
 	git diff --cc --raw $trees $base_tree >out &&
 	# Check for forty leading colons in the output:
-	grep "^::::::::::::::::::::::::::::::::::::::::[^:]" out
+	test_grep "^::::::::::::::::::::::::::::::::::::::::[^:]" out
 '
 
 test_expect_success 'setup combined ignore spaces' '

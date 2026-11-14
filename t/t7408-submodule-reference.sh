@@ -4,6 +4,7 @@
 #
 
 test_description='test clone --reference'
+
 . ./test-lib.sh
 
 base_dir=$(pwd)
@@ -16,6 +17,10 @@ test_alternate_is_used () {
 	git -C "$working_dir" count-objects >actual &&
 	test_cmp expect actual
 }
+
+test_expect_success 'setup' '
+	git config --global protocol.file.allow always
+'
 
 test_expect_success 'preparing first repository' '
 	test_create_repo A &&

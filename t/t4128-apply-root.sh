@@ -2,7 +2,6 @@
 
 test_description='apply same filename'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -42,6 +41,47 @@ test_expect_success 'apply --directory -p (2) ' '
 	test_cmp expect actual &&
 	test_cmp expect some/sub/dir/file
 
+'
+
+test_expect_success 'apply --directory (./ prefix)' '
+	git reset --hard initial &&
+	git apply --directory=./some/sub -p3 --index patch &&
+	echo Bello >expect &&
+	git show :some/sub/dir/file >actual &&
+	test_cmp expect actual &&
+	test_cmp expect some/sub/dir/file
+'
+
+test_expect_success 'apply --directory (double slash)' '
+	git reset --hard initial &&
+	git apply --directory=some//sub -p3 --index patch &&
+	echo Bello >expect &&
+	git show :some/sub/dir/file >actual &&
+	test_cmp expect actual &&
+	test_cmp expect some/sub/dir/file
+'
+
+test_expect_success 'apply --directory (./ in the middle)' '
+	git reset --hard initial &&
+	git apply --directory=some/./sub -p3 --index patch &&
+	echo Bello >expect &&
+	git show :some/sub/dir/file >actual &&
+	test_cmp expect actual &&
+	test_cmp expect some/sub/dir/file
+'
+
+test_expect_success 'apply --directory (../ in the middle)' '
+	git reset --hard initial &&
+	git apply --directory=some/../some/sub -p3 --index patch &&
+	echo Bello >expect &&
+	git show :some/sub/dir/file >actual &&
+	test_cmp expect actual &&
+	test_cmp expect some/sub/dir/file
+'
+
+test_expect_success 'apply --directory rejects leading ../' '
+	test_must_fail git apply --directory=../foo -p3 patch 2>err &&
+	test_grep "unable to normalize directory" err
 '
 
 cat > patch << EOF
@@ -98,7 +138,7 @@ test_expect_success 'apply --directory (delete file)' '
 	git add some/sub/dir/delfile &&
 	git apply --directory=some/sub/dir/ --index patch &&
 	git ls-files >out &&
-	! grep delfile out
+	test_grep ! delfile out
 '
 
 cat > patch << 'EOF'

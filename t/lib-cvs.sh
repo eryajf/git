@@ -2,6 +2,12 @@
 
 . ./test-lib.sh
 
+if test -n "$NO_CVS_TESTS"
+then
+	skip_all='skipping git cvs tests, NO_CVS_TESTS defined'
+	test_done
+fi
+
 unset CVS_SERVER
 
 if ! type cvs >/dev/null 2>&1
@@ -71,8 +77,8 @@ test_cmp_branch_tree () {
 		find . -type d -name .git -prune -o -type f -print
 	) | sort >module-git-"$1".list &&
 	test_cmp module-cvs-"$1".list module-git-"$1".list &&
-	cat module-cvs-"$1".list | while read f
+	while read f
 	do
 		test_cmp_branch_file "$1" "$f" || return 1
-	done
+	done <module-cvs-"$1".list
 }

@@ -4,7 +4,6 @@ test_description='show-ref'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success setup '
@@ -121,13 +120,13 @@ test_expect_success 'show-ref -d' '
 
 '
 
-test_expect_success 'show-ref --heads, --tags, --head, pattern' '
+test_expect_success 'show-ref --branches, --tags, --head, pattern' '
 	for branch in B main side
 	do
 		echo $(git rev-parse refs/heads/$branch) refs/heads/$branch || return 1
-	done >expect.heads &&
-	git show-ref --heads >actual &&
-	test_cmp expect.heads actual &&
+	done >expect.branches &&
+	git show-ref --branches >actual &&
+	test_cmp expect.branches actual &&
 
 	for tag in A B C
 	do
@@ -136,15 +135,15 @@ test_expect_success 'show-ref --heads, --tags, --head, pattern' '
 	git show-ref --tags >actual &&
 	test_cmp expect.tags actual &&
 
-	cat expect.heads expect.tags >expect &&
-	git show-ref --heads --tags >actual &&
+	cat expect.branches expect.tags >expect &&
+	git show-ref --branches --tags >actual &&
 	test_cmp expect actual &&
 
 	{
 		echo $(git rev-parse HEAD) HEAD &&
-		cat expect.heads expect.tags
+		cat expect.branches expect.tags
 	} >expect &&
-	git show-ref --heads --tags --head >actual &&
+	git show-ref --branches --tags --head >actual &&
 	test_cmp expect actual &&
 
 	{
@@ -165,6 +164,14 @@ test_expect_success 'show-ref --heads, --tags, --head, pattern' '
 	test_cmp expect actual
 '
 
+test_expect_success 'show-ref --heads is deprecated and hidden' '
+	git show-ref -h >short-help &&
+	test_grep ! -e --heads short-help &&
+	git show-ref --heads >actual 2>warning &&
+	test_grep ! deprecated warning &&
+	test_cmp expect.branches actual
+'
+
 test_expect_success 'show-ref --verify HEAD' '
 	echo $(git rev-parse HEAD) HEAD >expect &&
 	git show-ref --verify HEAD >actual &&
@@ -174,6 +181,14 @@ test_expect_success 'show-ref --verify HEAD' '
 	test_must_be_empty actual
 '
 
+test_expect_success 'show-ref --verify pseudorefs' '
+	git update-ref CHERRY_PICK_HEAD HEAD $ZERO_OID &&
+	test_when_finished "git update-ref -d CHERRY_PICK_HEAD" &&
+	git show-ref -s --verify HEAD >actual &&
+	git show-ref -s --verify CHERRY_PICK_HEAD >expect &&
+	test_cmp actual expect
+'
+
 test_expect_success 'show-ref --verify with dangling ref' '
 	sha1_file() {
 		echo "$*" | sed "s#..#.git/objects/&/#"
@@ -181,7 +196,7 @@ test_expect_success 'show-ref --verify with dangling ref' '
 
 	remove_object() {
 		file=$(sha1_file "$*") &&
-		test -e "$file" &&
+		test_path_is_file "$file" &&
 		rm -f "$file"
 	} &&
 
@@ -194,6 +209,23 @@ test_expect_success 'show-ref --verify with dangling ref' '
 		remove_object $sha &&
 		test_must_fail git show-ref --verify refs/tags/dangling
 	)
+'
+
+test_expect_success 'show-ref sub-modes are mutually exclusive' '
+	test_must_fail git show-ref --verify --exclude-existing 2>err &&
+	test_grep "verify" err &&
+	test_grep "exclude-existing" err &&
+	test_grep "cannot be used together" err &&
+
+	test_must_fail git show-ref --verify --exists 2>err &&
+	test_grep "verify" err &&
+	test_grep "exists" err &&
+	test_grep "cannot be used together" err &&
+
+	test_must_fail git show-ref --exclude-existing --exists 2>err &&
+	test_grep "exclude-existing" err &&
+	test_grep "exists" err &&
+	test_grep "cannot be used together" err
 '
 
 test_done

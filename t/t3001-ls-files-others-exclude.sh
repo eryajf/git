@@ -8,7 +8,6 @@ test_description='git ls-files --others --exclude
 This test runs git ls-files --others and tests --exclude patterns.
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 rm -fr one three
@@ -73,6 +72,7 @@ test_expect_success 'git ls-files --others with various exclude options.' '
        --exclude-per-directory=.gitignore \
        --exclude-from=.git/ignore \
 	>output &&
+	test_filter_gitconfig output &&
 	test_cmp expect output
 '
 
@@ -85,6 +85,7 @@ test_expect_success 'git ls-files --others with \r\n line endings.' '
        --exclude-per-directory=.gitignore \
        --exclude-from=.git/ignore \
 	>output &&
+	test_filter_gitconfig output &&
 	test_cmp expect output
 '
 
@@ -100,10 +101,11 @@ test_expect_success 'git ls-files --others with various exclude options.' '
        --exclude-per-directory=.gitignore \
        --exclude-from=.git/ignore \
 	>output &&
+	test_filter_gitconfig output &&
 	test_cmp expect output
 '
 
-test_expect_success !SANITIZE_LEAK 'restore gitignore' '
+test_expect_success 'restore gitignore' '
 	git checkout --ignore-skip-worktree-bits $allignores &&
 	rm .git/index
 '
@@ -126,7 +128,7 @@ cat > expect << EOF
 #	three/
 EOF
 
-test_expect_success !SANITIZE_LEAK 'git status honors core.excludesfile' \
+test_expect_success 'git status honors core.excludesfile' \
 	'test_cmp expect output'
 
 test_expect_success 'trailing slash in exclude allows directory match(1)' '
@@ -159,21 +161,21 @@ test_expect_success 'trailing slash in exclude forces directory match (1)' '
 
 	>two &&
 	git ls-files --others --exclude=two/ >output &&
-	grep "^two" output
+	test_grep "^two" output
 
 '
 
 test_expect_success 'trailing slash in exclude forces directory match (2)' '
 
 	git ls-files --others --exclude=one/a.1/ >output &&
-	grep "^one/a.1" output
+	test_grep "^one/a.1" output
 
 '
 
 test_expect_success 'negated exclude matches can override previous ones' '
 
 	git ls-files --others --exclude="a.*" --exclude="!a.1" >output &&
-	grep "^a.1" output
+	test_grep "^a.1" output
 '
 
 test_expect_success 'excluded directory overrides content patterns' '

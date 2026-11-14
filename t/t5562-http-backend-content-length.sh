@@ -1,7 +1,14 @@
 #!/bin/sh
 
 test_description='test git-http-backend respects CONTENT_LENGTH'
+
 . ./test-lib.sh
+
+if ! test_have_prereq PERL_TEST_HELPERS
+then
+	skip_all='skipping http backend content tests; Perl not available'
+	test_done
+fi
 
 test_lazy_prereq GZIP 'gzip --version'
 
@@ -156,7 +163,7 @@ test_expect_success 'CONTENT_LENGTH overflow ssite_t' '
 		REQUEST_METHOD=POST \
 		CONTENT_LENGTH="$NOT_FIT_IN_SSIZE" \
 		git http-backend </dev/null >/dev/null 2>err &&
-	grep "fatal:.*CONTENT_LENGTH" err
+	test_grep "fatal:.*CONTENT_LENGTH" err
 '
 
 test_expect_success 'empty CONTENT_LENGTH' '

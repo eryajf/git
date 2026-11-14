@@ -3,13 +3,13 @@
  */
 
 #include "test-tool.h"
-#include "cache.h"
-#include "strbuf.h"
+#include "gettext.h"
 #include "simple-ipc.h"
 #include "parse-options.h"
 #include "thread-utils.h"
 #include "strvec.h"
 #include "run-command.h"
+#include "trace2.h"
 
 #ifndef SUPPORTS_SIMPLE_IPC
 int cmd__simple_ipc(int argc, const char **argv)
@@ -277,7 +277,8 @@ static int daemon__run_server(void)
 
 static start_bg_wait_cb bg_wait_cb;
 
-static int bg_wait_cb(const struct child_process *cp, void *cb_data)
+static int bg_wait_cb(const struct child_process *cp UNUSED,
+		      void *cb_data UNUSED)
 {
 	int s = ipc_get_active_state(cl_args.path);
 
@@ -602,7 +603,12 @@ int cmd__simple_ipc(int argc, const char **argv)
 		OPT_INTEGER(0, "bytecount", &cl_args.bytecount, N_("number of bytes")),
 		OPT_INTEGER(0, "batchsize", &cl_args.batchsize, N_("number of requests per thread")),
 
-		OPT_STRING(0, "byte", &bytevalue, N_("byte"), N_("ballast character")),
+		/*
+		 * The "byte" string here is not marked for translation and
+		 * instead relies on translation in strbuf.c:humanise_bytes() to
+		 * avoid conflict with the plural form.
+		 */
+		OPT_STRING(0, "byte", &bytevalue, "byte", N_("ballast character")),
 		OPT_STRING(0, "token", &cl_args.token, N_("token"), N_("command token to send to the server")),
 
 		OPT_END()
@@ -611,8 +617,8 @@ int cmd__simple_ipc(int argc, const char **argv)
 	if (argc < 2)
 		usage_with_options(simple_ipc_usage, options);
 
-	if (argc == 2 && !strcmp(argv[1], "-h"))
-		usage_with_options(simple_ipc_usage, options);
+	show_usage_with_options_if_asked(argc, argv,
+					 simple_ipc_usage, options);
 
 	if (argc == 2 && !strcmp(argv[1], "SUPPORTS_SIMPLE_IPC"))
 		return 0;
